@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { createCandidatesRepository } from '../db/repositories/candidates-repository';
 import { createRuntimeStateRepository } from '../db/repositories/runtime-state-repository';
 import { createTelegramActionsRepository } from '../db/repositories/telegram-actions-repository';
@@ -62,9 +64,9 @@ export type RunTickResult = {
 };
 
 const SLOT_STATE_KEY_PREFIX = 'scheduled_window_slot:';
-const SLOT_RETRY_STATE_KEY_PREFIX = 'scheduled_window_slot_retry:';
 const DEADLINE_MINUTES = 15;
 const MAX_DRAFTER_ATTEMPTS = 2;
+type WindowSlotLifecycleStatus = 'in_progress' | 'retry_pending' | 'completed' | 'skipped';
 
 type FinalizedWindowSlotOutcome =
   | 'draft_ready'
@@ -104,10 +106,6 @@ function buildWindowSlotStateKey(slotId: string): string {
   return `${SLOT_STATE_KEY_PREFIX}${slotId}`;
 }
 
-function buildWindowSlotRetryStateKey(slotId: string): string {
-  return `${SLOT_RETRY_STATE_KEY_PREFIX}${slotId}`;
-}
-
 function formatError(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message.trim();
@@ -116,19 +114,112 @@ function formatError(error: unknown): string {
   return String(error);
 }
 
-async function listClaimedSlotIds(db: Queryable): Promise<Set<string>> {
-  const result = await db.query<{ state_key: string }>(
-    `
-      select state_key
-      from sp_runtime_state
-      where state_key like $1
-    `,
-    [`${SLOT_STATE_KEY_PREFIX}%`],
-  );
+function getWindowSlotStatus(stateJson: unknown): WindowSlotLifecycleStatus | null {
+  if (
+    typeof stateJson === 'object'
+    && stateJson !== null
+    && 'status' in stateJson
+    && typeof stateJson.status === 'string'
+    && (
+      stateJson.status === 'in_progress'
+      || stateJson.status === 'retry_pending'
+      || stateJson.status === 'completed'
+      || stateJson.status === 'skipped'
+    )
+  ) {
+    return stateJson.status;
+  }
+
+  return null;
+}
+
+function isFinalizedWindowSlotState(stateJson: unknown): boolean {
+  const status = getWindowSlotStatus(stateJson);
+
+  return status === 'completed' || status === 'skipped';
+}
+
+async function listFinalizedSlotIds(
+  runtimeStateRepository: ReturnType<typeof createRuntimeStateRepository>,
+): Promise<Set<string>> {
+  const slotStates = await runtimeStateRepository.listStatesByPrefix(SLOT_STATE_KEY_PREFIX);
 
   return new Set(
-    result.rows.map((row) => row.state_key.slice(SLOT_STATE_KEY_PREFIX.length)),
+    slotStates
+      .filter((state) => isFinalizedWindowSlotState(state.stateJson))
+      .map((state) => state.stateKey.slice(SLOT_STATE_KEY_PREFIX.length)),
   );
+}
+
+function buildInProgressWindowSlotState(input: {
+  slot: {
+    slotId: string;
+    windowName: string;
+    scheduledFor: Date;
+  };
+  now: Date;
+  attemptCount: number;
+  ownerId: string;
+}) {
+  return {
+    slotId: input.slot.slotId,
+    windowName: input.slot.windowName,
+    scheduledFor: input.slot.scheduledFor.toISOString(),
+    status: 'in_progress' as const,
+    attemptCount: input.attemptCount,
+    ownerId: input.ownerId,
+    claimedAt: input.now.toISOString(),
+  };
+}
+
+async function claimWindowSlot(input: {
+  runtimeStateRepository: ReturnType<typeof createRuntimeStateRepository>;
+  slot: {
+    slotId: string;
+    windowName: string;
+    scheduledFor: Date;
+  };
+  now: Date;
+  ownerId: string;
+}): Promise<{ attemptCount: number } | null> {
+  const stateKey = buildWindowSlotStateKey(input.slot.slotId);
+  const inserted = await input.runtimeStateRepository.insertStateIfAbsent(
+    stateKey,
+    buildInProgressWindowSlotState({
+      slot: input.slot,
+      now: input.now,
+      attemptCount: 1,
+      ownerId: input.ownerId,
+    }),
+  );
+
+  if (inserted) {
+    return { attemptCount: 1 };
+  }
+
+  const existingState = await input.runtimeStateRepository.getState(stateKey);
+
+  if (getWindowSlotStatus(existingState?.stateJson) !== 'retry_pending') {
+    return null;
+  }
+
+  const nextAttemptCount = getRetryAttemptCount(existingState?.stateJson) + 1;
+  const claimedRetry = await input.runtimeStateRepository.setStateIfStatus(
+    stateKey,
+    'retry_pending',
+    buildInProgressWindowSlotState({
+      slot: input.slot,
+      now: input.now,
+      attemptCount: nextAttemptCount,
+      ownerId: input.ownerId,
+    }),
+  );
+
+  if (!claimedRetry) {
+    return null;
+  }
+
+  return { attemptCount: nextAttemptCount };
 }
 
 async function runSyncSources(sources: readonly SyncSource[]): Promise<{ degraded: boolean }> {
@@ -185,6 +276,7 @@ async function finalizeWindowSlot(input: {
   now: Date;
   outcome: FinalizedWindowSlotOutcome;
   attemptCount: number;
+  ownerId: string;
   candidateId: string | null;
   errorDetails: string | null;
 }): Promise<void> {
@@ -195,11 +287,11 @@ async function finalizeWindowSlot(input: {
     status: input.outcome === 'draft_ready' ? 'completed' : 'skipped',
     outcome: input.outcome,
     attemptCount: input.attemptCount,
+    ownerId: input.ownerId,
     candidateId: input.candidateId,
     errorDetails: input.errorDetails,
     resolvedAt: input.now.toISOString(),
   });
-  await input.runtimeStateRepository.deleteState(buildWindowSlotRetryStateKey(input.slot.slotId));
 }
 
 async function rememberRetryableWindowSlotFailure(input: {
@@ -211,15 +303,17 @@ async function rememberRetryableWindowSlotFailure(input: {
   };
   now: Date;
   attemptCount: number;
+  ownerId: string;
   candidateId: string;
   errorDetails: string;
 }): Promise<void> {
-  await input.runtimeStateRepository.setState(buildWindowSlotRetryStateKey(input.slot.slotId), {
+  await input.runtimeStateRepository.setState(buildWindowSlotStateKey(input.slot.slotId), {
     slotId: input.slot.slotId,
     windowName: input.slot.windowName,
     scheduledFor: input.slot.scheduledFor.toISOString(),
     status: 'retry_pending',
     attemptCount: input.attemptCount,
+    ownerId: input.ownerId,
     candidateId: input.candidateId,
     errorDetails: input.errorDetails,
     lastFailedAt: input.now.toISOString(),
@@ -386,16 +480,17 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
   const runtimeStateRepository = createRuntimeStateRepository(input.db);
   const telegramActionsRepository = createTelegramActionsRepository(input.db);
   const windows = parseWindowsJson(input.windowsJson);
-  const claimedSlotIds = await listClaimedSlotIds(input.db);
+  const finalizedSlotIds = await listFinalizedSlotIds(runtimeStateRepository);
   const dueSlots = findDueWindowSlots({
     windows,
     now: now(),
-    claimedSlotIds,
+    claimedSlotIds: finalizedSlotIds,
     randomFractionForSlot: input.randomFractionForSlot,
   });
   const reminderCandidateIds: string[] = [];
   const postRequestedCandidateIds: string[] = [];
   const createdCandidateIds: string[] = [];
+  const tickRunId = randomUUID();
 
   if (dryRun) {
     const candidates = await listCandidatesForAutomation(input.db);
@@ -444,8 +539,18 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
   }
 
   for (const slot of dueSlots) {
-    const retryState = await runtimeStateRepository.getState(buildWindowSlotRetryStateKey(slot.slotId));
-    const nextAttemptCount = getRetryAttemptCount(retryState?.stateJson) + 1;
+    const claimedSlot = await claimWindowSlot({
+      runtimeStateRepository,
+      slot,
+      now: now(),
+      ownerId: tickRunId,
+    });
+
+    if (!claimedSlot) {
+      continue;
+    }
+
+    const nextAttemptCount = claimedSlot.attemptCount;
 
     const result = await runSharedDraftPipeline({
       db: input.db,
@@ -477,6 +582,7 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
         slot,
         now: processedAt,
         attemptCount: nextAttemptCount,
+        ownerId: tickRunId,
         candidateId: result.candidateId,
         errorDetails: result.errorDetails,
       });
@@ -492,6 +598,7 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
       now: processedAt,
       outcome: finalizedOutcome,
       attemptCount: nextAttemptCount,
+      ownerId: tickRunId,
       candidateId: result.candidateId,
       errorDetails: result.errorDetails,
     });

@@ -26,6 +26,20 @@ function mapRuntimeStateRow(row: RuntimeStateRow): RuntimeStateRecord {
 
 export function createRuntimeStateRepository(db: Queryable) {
   return {
+    async listStatesByPrefix(stateKeyPrefix: string): Promise<RuntimeStateRecord[]> {
+      const result = await db.query<RuntimeStateRow>(
+        `
+          select state_key, state_json, updated_at
+          from sp_runtime_state
+          where state_key like $1
+          order by state_key asc
+        `,
+        [`${stateKeyPrefix}%`],
+      );
+
+      return result.rows.map(mapRuntimeStateRow);
+    },
+
     async getState(stateKey: string): Promise<RuntimeStateRecord | null> {
       const result = await db.query<RuntimeStateRow>(
         `
@@ -61,6 +75,44 @@ export function createRuntimeStateRepository(db: Queryable) {
       }
 
       return mapRuntimeStateRow(row);
+    },
+
+    async insertStateIfAbsent(stateKey: string, stateJson: unknown): Promise<RuntimeStateRecord | null> {
+      const result = await db.query<RuntimeStateRow>(
+        `
+          insert into sp_runtime_state (state_key, state_json)
+          values ($1, $2)
+          on conflict (state_key) do nothing
+          returning state_key, state_json, updated_at
+        `,
+        [stateKey, toJsonbValue(stateJson)],
+      );
+
+      const row = result.rows[0];
+
+      return row ? mapRuntimeStateRow(row) : null;
+    },
+
+    async setStateIfStatus(
+      stateKey: string,
+      expectedStatus: string,
+      stateJson: unknown,
+    ): Promise<RuntimeStateRecord | null> {
+      const result = await db.query<RuntimeStateRow>(
+        `
+          update sp_runtime_state
+          set state_json = $2,
+              updated_at = now()
+          where state_key = $1
+            and state_json ->> 'status' = $3
+          returning state_key, state_json, updated_at
+        `,
+        [stateKey, toJsonbValue(stateJson), expectedStatus],
+      );
+
+      const row = result.rows[0];
+
+      return row ? mapRuntimeStateRow(row) : null;
     },
 
     async deleteState(stateKey: string): Promise<void> {

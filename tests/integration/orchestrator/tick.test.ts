@@ -56,6 +56,21 @@ function requireValue<T>(value: T | undefined, label: string): T {
   return value;
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return {
+    promise,
+    resolve,
+    reject,
+  };
+}
+
 async function allocatePort(): Promise<number> {
   const server = createServer();
 
@@ -1014,6 +1029,126 @@ describe('orchestrator Task 10 flow', () => {
     ]);
   });
 
+  it('lets only one overlapping scheduled tick own a due slot', async () => {
+    await seedEvents(database.pool, [
+      {
+        source: 'github',
+        sourceId: 'github-overlapping-scheduled-slot',
+        occurredAt: new Date('2026-04-15T09:55:00.000Z'),
+        author: 'dylanvu',
+        summary: 'Overlapping ticks must not draft the same slot twice',
+      },
+    ]);
+
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const firstSelectorEntered = createDeferred<void>();
+    const releaseFirstSelector = createDeferred<void>();
+    const secondSelectorEntered = createDeferred<void>();
+    let selectorCallCount = 0;
+    const runSelector = vi.fn(async (context: Awaited<ReturnType<typeof buildRecentContextPacket>>) => {
+      selectorCallCount += 1;
+
+      if (selectorCallCount === 1) {
+        firstSelectorEntered.resolve();
+        await releaseFirstSelector.promise;
+      } else {
+        secondSelectorEntered.resolve();
+      }
+
+      return {
+        decision: 'select' as const,
+        candidate_type: 'ship_update',
+        angle: 'Claim this scheduled slot once',
+        why_interesting: 'Only one overlapping tick should own the slot',
+        source_event_ids: [requireValue(context.events[0], 'context.events[0]').id],
+        artifact_ids: [],
+        primary_anchor: 'The slot is due exactly once',
+        supporting_points: ['first tick claims', 'second tick exits'],
+        quote_target: null,
+        suggested_media_kind: null,
+        suggested_media_request: null,
+      };
+    });
+    const runDrafter = vi.fn(async () => ({
+      decision: 'success' as const,
+      delivery_kind: 'single_post' as const,
+      draft_text: 'Only one overlapping tick should produce this draft.',
+      candidate_type: 'ship_update',
+      quote_target_url: null,
+      why_chosen: 'The slot owner should be unique.',
+      receipts: ['slot claimed', 'selector ok', 'drafter ok'],
+      media_request: null,
+      allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
+    }));
+    const windowsJson = [
+      {
+        name: 'weekday-morning',
+        days: ['wed'],
+        start: '10:00',
+        end: '11:00',
+      },
+    ];
+    const tickInput = {
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:30:00'),
+      randomFractionForSlot: () => 0.5,
+      runSelector,
+      runDrafter,
+    } as const;
+
+    const firstTickPromise = runTick(tickInput);
+    await firstSelectorEntered.promise;
+
+    const secondTickPromise = runTick(tickInput);
+    const overlapOutcome = await Promise.race([
+      secondTickPromise.then(() => 'tick_finished' as const),
+      secondSelectorEntered.promise.then(() => 'selector_started' as const),
+      new Promise<'timeout'>((resolve) => {
+        setTimeout(() => resolve('timeout'), 1000);
+      }),
+    ]);
+
+    releaseFirstSelector.resolve();
+
+    const [firstTickResult, secondTickResult] = await Promise.all([firstTickPromise, secondTickPromise]);
+    const candidates = await database.pool.query<{ id: string; status: string }>(
+      `
+        select id, status
+        from sp_post_candidates
+        order by id asc
+      `,
+    );
+    const slotState = await database.pool.query<{ state_json: unknown }>(
+      `
+        select state_json
+        from sp_runtime_state
+        where state_key = 'scheduled_window_slot:weekday-morning:2026-04-15'
+      `,
+    );
+
+    expect(overlapOutcome).toBe('tick_finished');
+    expect(firstTickResult.createdCandidateIds).toEqual(['1']);
+    expect(secondTickResult.createdCandidateIds).toEqual([]);
+    expect(runSelector).toHaveBeenCalledOnce();
+    expect(runDrafter).toHaveBeenCalledOnce();
+    expect(telegram.sentPackages).toHaveLength(1);
+    expect(candidates.rows).toEqual([{ id: '1', status: 'pending_approval' }]);
+    expect(slotState.rows).toEqual([
+      {
+        state_json: expect.objectContaining({
+          slotId: 'weekday-morning:2026-04-15',
+          status: 'completed',
+          attemptCount: 1,
+          candidateId: '1',
+          ownerId: expect.any(String),
+        }),
+      },
+    ]);
+  });
+
   it('skips a scheduled slot cleanly when selector execution throws', async () => {
     await seedEvents(database.pool, [
       {
@@ -1147,16 +1282,9 @@ describe('orchestrator Task 10 flow', () => {
     });
 
     const firstAttemptCandidate = await getCandidateById(database.pool, '1');
-    const retryStateAfterFirstAttempt = await database.pool.query<{ state_json: unknown }>(
+    const slotStateAfterFirstAttempt = await database.pool.query<{ state_json: unknown }>(
       `
         select state_json
-        from sp_runtime_state
-        where state_key = 'scheduled_window_slot_retry:weekday-morning:2026-04-15'
-      `,
-    );
-    const finalSlotStateAfterFirstAttempt = await database.pool.query<{ count: string }>(
-      `
-        select count(*)
         from sp_runtime_state
         where state_key = 'scheduled_window_slot:weekday-morning:2026-04-15'
       `,
@@ -1166,18 +1294,18 @@ describe('orchestrator Task 10 flow', () => {
     expect(runDrafter).toHaveBeenCalledOnce();
     expect(firstAttemptCandidate?.status).toBe('drafter_skipped');
     expect(firstAttemptCandidate?.errorDetails).toContain('temporary drafter outage');
-    expect(retryStateAfterFirstAttempt.rows).toEqual([
+    expect(slotStateAfterFirstAttempt.rows).toEqual([
       {
         state_json: expect.objectContaining({
           slotId: 'weekday-morning:2026-04-15',
           status: 'retry_pending',
           attemptCount: 1,
+          ownerId: expect.any(String),
           candidateId: '1',
           errorDetails: 'temporary drafter outage',
         }),
       },
     ]);
-    expect(finalSlotStateAfterFirstAttempt.rows[0]?.count).toBe('0');
 
     await runTick({
       db: database.pool,
@@ -1195,13 +1323,6 @@ describe('orchestrator Task 10 flow', () => {
         select state_json
         from sp_runtime_state
         where state_key = 'scheduled_window_slot:weekday-morning:2026-04-15'
-      `,
-    );
-    const retryStateAfterSuccess = await database.pool.query<{ count: string }>(
-      `
-        select count(*)
-        from sp_runtime_state
-        where state_key = 'scheduled_window_slot_retry:weekday-morning:2026-04-15'
       `,
     );
     const candidates = await database.pool.query<{ id: string; status: string }>(
@@ -1223,12 +1344,12 @@ describe('orchestrator Task 10 flow', () => {
           status: 'completed',
           outcome: 'draft_ready',
           attemptCount: 2,
+          ownerId: expect.any(String),
           candidateId: '2',
           errorDetails: null,
         }),
       },
     ]);
-    expect(retryStateAfterSuccess.rows[0]?.count).toBe('0');
     expect(candidates.rows).toEqual([
       { id: '1', status: 'drafter_skipped' },
       { id: '2', status: 'pending_approval' },
