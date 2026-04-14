@@ -94,6 +94,14 @@ function getString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function formatError(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message.trim();
+  }
+
+  return String(error);
+}
+
 function buildSelectorRunner(input: Pick<SelectCandidateInput, 'runSelector' | 'hermesBin' | 'hermesExecutor'>): SelectorRunner {
   if (input.runSelector) {
     return input.runSelector;
@@ -282,7 +290,17 @@ export async function selectCandidate({
     mediaRequest: selectorResult.suggested_media_request,
   });
 
-  await persistCandidateSourceLinks(db, candidate.id, selectedEvents, selectedArtifacts);
+  try {
+    await persistCandidateSourceLinks(db, candidate.id, selectedEvents, selectedArtifacts);
+  } catch (error) {
+    await candidatesRepository.transitionStatus({
+      id: candidate.id,
+      fromStatuses: ['drafting'],
+      toStatus: 'selector_skipped',
+      errorDetails: formatError(error),
+    });
+    throw error;
+  }
 
   return {
     outcome: 'select',

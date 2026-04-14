@@ -62,5 +62,15 @@ export function createRuntimeStateRepository(db: Queryable) {
 
       return mapRuntimeStateRow(row);
     },
+
+    async deleteState(stateKey: string): Promise<void> {
+      await db.query(
+        `
+          delete from sp_runtime_state
+          where state_key = $1
+        `,
+        [stateKey],
+      );
+    },
   };
 }

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:net';
 import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import type { Pool } from 'pg';
@@ -15,9 +16,30 @@ import { createPublishedPostsRepository } from '../../../src/db/repositories/pub
 import { upsertEvents } from '../../../src/normalization/upsert-events';
 import { buildRecentContextPacket } from '../../../src/orchestrator/context-builder';
 import { draftSelectedCandidate } from '../../../src/orchestrator/draft-candidate';
+import {
+  applyCandidateAction,
+  getCandidateById,
+} from '../../../src/orchestrator/state-machine';
+import {
+  runTick,
+} from '../../../src/orchestrator/tick';
+import {
+  findDueWindowSlots,
+  parseWindowsJson,
+} from '../../../src/orchestrator/windows';
 import { selectCandidate } from '../../../src/orchestrator/select-candidate';
 import type { NormalizedEventInput } from '../../../src/normalization/types';
 import type { XThreadLookupClient } from '../../../src/enrichment/x/client';
+import { runDraftNow } from '../../../src/commands/draft-now';
+import {
+  formatCandidatePackageMessage,
+} from '../../../src/telegram/command-parser';
+import type {
+  SendCandidatePackageInput,
+  TelegramClient,
+  TelegramMessage,
+  TelegramUpdate,
+} from '../../../src/telegram/client';
 
 const execFileAsync = promisify(execFile);
 
@@ -190,6 +212,81 @@ async function createPublishedPost(pool: Pool, input?: { postedAt?: Date }) {
     quoteTargetUrl: 'https://x.com/example/status/999',
     publisherResponse: { ok: true },
   });
+}
+
+function atLocal(value: string): Date {
+  if (/[zZ]|[+-]\d{2}:\d{2}$/.test(value)) {
+    return new Date(value);
+  }
+
+  return new Date(`${value}-04:00`);
+}
+
+function createStubTelegramClient(input: { chatId: number }) {
+  const sentPackages: SendCandidatePackageInput[] = [];
+  const sentMessages: TelegramMessage[] = [];
+  const queuedUpdates: TelegramUpdate[][] = [];
+  let nextMessageId = 8000;
+
+  const client: TelegramClient = {
+    async getUpdates() {
+      return queuedUpdates.shift() ?? [];
+    },
+
+    async sendCandidatePackage(candidatePackage) {
+      sentPackages.push(candidatePackage);
+      const message: TelegramMessage = {
+        message_id: nextMessageId,
+        chat: {
+          id: input.chatId,
+          type: 'private',
+        },
+        date: Math.floor(Date.now() / 1000),
+        text: formatCandidatePackageMessage(candidatePackage),
+      };
+
+      nextMessageId += 1;
+      sentMessages.push(message);
+      return message;
+    },
+  };
+
+  return {
+    client,
+    sentPackages,
+    sentMessages,
+    enqueueUpdates(updates: TelegramUpdate[]) {
+      queuedUpdates.push(updates);
+    },
+  };
+}
+
+function createControlReplyUpdate(input: {
+  updateId: number;
+  chatId: number;
+  fromUserId?: number;
+  text: string;
+  replyToMessage: TelegramMessage;
+}): TelegramUpdate {
+  return {
+    update_id: input.updateId,
+    message: {
+      message_id: input.updateId + 100,
+      chat: {
+        id: input.chatId,
+        type: 'private',
+      },
+      from: {
+        id: input.fromUserId ?? 42,
+        is_bot: false,
+      },
+      text: input.text,
+      reply_to_message: {
+        message_id: input.replyToMessage.message_id,
+        text: input.replyToMessage.text,
+      },
+    },
+  };
 }
 
 describe('orchestrator Task 10 flow', () => {
@@ -696,5 +793,770 @@ describe('orchestrator Task 10 flow', () => {
         },
       },
     ]);
+  });
+
+  it('evaluates broad scheduled windows with deterministic jitter', async () => {
+    const windows = parseWindowsJson([
+      {
+        name: 'weekday-morning',
+        days: ['wed'],
+        start: '10:00',
+        end: '11:00',
+      },
+    ]);
+
+    const beforeDue = findDueWindowSlots({
+      windows,
+      now: atLocal('2026-04-15T10:29:00'),
+      claimedSlotIds: new Set<string>(),
+      randomFractionForSlot: () => 0.5,
+    });
+    const atDue = findDueWindowSlots({
+      windows,
+      now: atLocal('2026-04-15T10:30:00'),
+      claimedSlotIds: new Set<string>(),
+      randomFractionForSlot: () => 0.5,
+    });
+
+    expect(beforeDue).toEqual([]);
+    expect(atDue).toHaveLength(1);
+    expect(atDue[0]).toMatchObject({
+      slotId: 'weekday-morning:2026-04-15',
+      windowName: 'weekday-morning',
+    });
+    expect(atDue[0]?.scheduledFor.getTime()).toBe(atLocal('2026-04-15T10:30:00').getTime());
+  });
+
+  it('evaluates scheduled windows in America/New_York even when the host timezone is UTC', async () => {
+    const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
+    const windowsModuleUrl = new URL('../../../src/orchestrator/windows.ts', import.meta.url).href;
+    const script = `
+      import { findDueWindowSlots, parseWindowsJson } from ${JSON.stringify(windowsModuleUrl)};
+
+      const windows = parseWindowsJson([
+        {
+          name: 'weekday-morning',
+          days: ['wed'],
+          start: '10:00',
+          end: '11:00',
+        },
+      ]);
+      const due = findDueWindowSlots({
+        windows,
+        now: new Date('2026-04-15T13:30:00.000Z'),
+        claimedSlotIds: new Set(),
+        randomFractionForSlot: () => 0.5,
+      });
+
+      process.stdout.write(
+        JSON.stringify(
+          due.map((slot) => ({
+            slotId: slot.slotId,
+            scheduledFor: slot.scheduledFor.toISOString(),
+          })),
+        ),
+      );
+    `;
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      ['--import', 'tsx', '--eval', script],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          TZ: 'UTC',
+        },
+      },
+    );
+
+    expect(JSON.parse(stdout)).toEqual([]);
+  });
+
+  it('sends a Telegram package for a newly ready scheduled draft and only one reminder at 10 minutes', async () => {
+    await seedEvents(database.pool, [
+      {
+        source: 'github',
+        sourceId: 'github-scheduled-draft',
+        occurredAt: new Date('2026-04-15T09:55:00.000Z'),
+        author: 'dylanvu',
+        title: 'social-posting push',
+        summary: 'Scheduled draft path',
+      },
+    ]);
+
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const syncSource = {
+      name: 'seeded-events',
+      sync: vi.fn(async () => []),
+    };
+    const runSelector = vi.fn(async (context: Awaited<ReturnType<typeof buildRecentContextPacket>>) => ({
+      decision: 'select' as const,
+      candidate_type: 'ship_update',
+      angle: 'Send the scheduled slot',
+      why_interesting: 'This slot should yield one draft and one reminder',
+      source_event_ids: [requireValue(context.events[0], 'context.events[0]').id],
+      artifact_ids: [],
+      primary_anchor: 'The scheduled slot is due',
+      supporting_points: ['One package', 'One reminder'],
+      quote_target: null,
+      suggested_media_kind: null,
+      suggested_media_request: null,
+    }));
+    const runDrafter = vi.fn(async () => ({
+      decision: 'success' as const,
+      delivery_kind: 'single_post' as const,
+      draft_text: 'Scheduled draft ready for review.',
+      candidate_type: 'ship_update',
+      quote_target_url: null,
+      why_chosen: 'The scheduler picked a real slot.',
+      receipts: ['window due', 'selector ok', 'drafter ok'],
+      media_request: null,
+      allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
+    }));
+    const windowsJson = [
+      {
+        name: 'weekday-morning',
+        days: ['wed'],
+        start: '10:00',
+        end: '11:00',
+      },
+    ];
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:30:00'),
+      randomFractionForSlot: () => 0.5,
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+    });
+
+    expect(syncSource.sync).toHaveBeenCalledOnce();
+    expect(runSelector).toHaveBeenCalledOnce();
+    expect(runDrafter).toHaveBeenCalledOnce();
+    expect(telegram.sentPackages).toHaveLength(1);
+    expect(telegram.sentPackages[0]).toMatchObject({
+      candidateType: 'ship_update',
+      draftText: 'Scheduled draft ready for review.',
+    });
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:39:00'),
+      randomFractionForSlot: () => 0.5,
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+    });
+    expect(telegram.sentPackages).toHaveLength(1);
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:40:00'),
+      randomFractionForSlot: () => 0.5,
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+    });
+    expect(telegram.sentPackages).toHaveLength(2);
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:44:00'),
+      randomFractionForSlot: () => 0.5,
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+    });
+    expect(telegram.sentPackages).toHaveLength(2);
+
+    const candidates = await database.pool.query<{
+      id: string;
+      status: string;
+      deadline_at: Date | null;
+      reminder_sent_at: Date | null;
+    }>(
+      `
+        select id, status, deadline_at, reminder_sent_at
+        from sp_post_candidates
+        order by id asc
+      `,
+    );
+    const slotClaims = await database.pool.query<{ state_key: string }>(
+      `
+        select state_key
+        from sp_runtime_state
+        where state_key like 'scheduled_window_slot:%'
+      `,
+    );
+
+    expect(candidates.rows).toHaveLength(1);
+    expect(candidates.rows[0]?.status).toBe('reminded');
+    expect(candidates.rows[0]?.deadline_at?.getTime()).toBe(atLocal('2026-04-15T10:45:00').getTime());
+    expect(candidates.rows[0]?.reminder_sent_at?.getTime()).toBe(atLocal('2026-04-15T10:40:00').getTime());
+    expect(slotClaims.rows).toEqual([
+      {
+        state_key: 'scheduled_window_slot:weekday-morning:2026-04-15',
+      },
+    ]);
+  });
+
+  it('skips a scheduled slot cleanly when selector execution throws', async () => {
+    await seedEvents(database.pool, [
+      {
+        source: 'github',
+        sourceId: 'github-selector-failure',
+        occurredAt: new Date('2026-04-15T13:55:00.000Z'),
+        author: 'dylanvu',
+        summary: 'Selector failure should skip this slot',
+      },
+    ]);
+
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const runSelector = vi.fn(async () => {
+      throw new Error('selector unavailable');
+    });
+    const runDrafter = vi.fn();
+    const windowsJson = [
+      {
+        name: 'weekday-morning',
+        days: ['wed'],
+        start: '10:00',
+        end: '11:00',
+      },
+    ];
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:30:00'),
+      randomFractionForSlot: () => 0.5,
+      runSelector,
+      runDrafter,
+    });
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:31:00'),
+      randomFractionForSlot: () => 0.5,
+      runSelector,
+      runDrafter,
+    });
+
+    const candidates = await database.pool.query<{ count: string }>('select count(*) from sp_post_candidates');
+    const slotState = await database.pool.query<{ state_json: unknown }>(
+      `
+        select state_json
+        from sp_runtime_state
+        where state_key = 'scheduled_window_slot:weekday-morning:2026-04-15'
+      `,
+    );
+
+    expect(runSelector).toHaveBeenCalledOnce();
+    expect(runDrafter).not.toHaveBeenCalled();
+    expect(telegram.sentPackages).toHaveLength(0);
+    expect(candidates.rows[0]?.count).toBe('0');
+    expect(slotState.rows).toEqual([
+      {
+        state_json: expect.objectContaining({
+          slotId: 'weekday-morning:2026-04-15',
+          status: 'skipped',
+          outcome: 'selector_failed',
+          attemptCount: 1,
+          candidateId: null,
+          errorDetails: 'selector unavailable',
+        }),
+      },
+    ]);
+  });
+
+  it('retries a scheduled slot once after a drafter exception before finalizing it', async () => {
+    await seedEvents(database.pool, [
+      {
+        source: 'github',
+        sourceId: 'github-drafter-retry',
+        occurredAt: new Date('2026-04-15T13:55:00.000Z'),
+        author: 'dylanvu',
+        summary: 'First drafter failure should leave one retry',
+      },
+    ]);
+
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const runSelector = vi.fn(async (context: Awaited<ReturnType<typeof buildRecentContextPacket>>) => ({
+      decision: 'select' as const,
+      candidate_type: 'ship_update',
+      angle: 'Retry the scheduled slot once',
+      why_interesting: 'The first drafter failure should not burn the slot',
+      source_event_ids: [requireValue(context.events[0], 'context.events[0]').id],
+      artifact_ids: [],
+      primary_anchor: 'One transient drafter outage',
+      supporting_points: ['first attempt fails', 'second attempt succeeds'],
+      quote_target: null,
+      suggested_media_kind: null,
+      suggested_media_request: null,
+    }));
+    const runDrafter = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('temporary drafter outage'))
+      .mockResolvedValueOnce({
+        decision: 'success' as const,
+        delivery_kind: 'single_post' as const,
+        draft_text: 'Second attempt worked.',
+        candidate_type: 'ship_update',
+        quote_target_url: null,
+        why_chosen: 'The retry path should still deliver one package.',
+        receipts: ['selector ok', 'retry ok'],
+        media_request: null,
+        allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
+      });
+    const windowsJson = [
+      {
+        name: 'weekday-morning',
+        days: ['wed'],
+        start: '10:00',
+        end: '11:00',
+      },
+    ];
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:30:00'),
+      randomFractionForSlot: () => 0.5,
+      runSelector,
+      runDrafter,
+    });
+
+    const firstAttemptCandidate = await getCandidateById(database.pool, '1');
+    const retryStateAfterFirstAttempt = await database.pool.query<{ state_json: unknown }>(
+      `
+        select state_json
+        from sp_runtime_state
+        where state_key = 'scheduled_window_slot_retry:weekday-morning:2026-04-15'
+      `,
+    );
+    const finalSlotStateAfterFirstAttempt = await database.pool.query<{ count: string }>(
+      `
+        select count(*)
+        from sp_runtime_state
+        where state_key = 'scheduled_window_slot:weekday-morning:2026-04-15'
+      `,
+    );
+
+    expect(runSelector).toHaveBeenCalledOnce();
+    expect(runDrafter).toHaveBeenCalledOnce();
+    expect(firstAttemptCandidate?.status).toBe('drafter_skipped');
+    expect(firstAttemptCandidate?.errorDetails).toContain('temporary drafter outage');
+    expect(retryStateAfterFirstAttempt.rows).toEqual([
+      {
+        state_json: expect.objectContaining({
+          slotId: 'weekday-morning:2026-04-15',
+          status: 'retry_pending',
+          attemptCount: 1,
+          candidateId: '1',
+          errorDetails: 'temporary drafter outage',
+        }),
+      },
+    ]);
+    expect(finalSlotStateAfterFirstAttempt.rows[0]?.count).toBe('0');
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:31:00'),
+      randomFractionForSlot: () => 0.5,
+      runSelector,
+      runDrafter,
+    });
+
+    const finalSlotState = await database.pool.query<{ state_json: unknown }>(
+      `
+        select state_json
+        from sp_runtime_state
+        where state_key = 'scheduled_window_slot:weekday-morning:2026-04-15'
+      `,
+    );
+    const retryStateAfterSuccess = await database.pool.query<{ count: string }>(
+      `
+        select count(*)
+        from sp_runtime_state
+        where state_key = 'scheduled_window_slot_retry:weekday-morning:2026-04-15'
+      `,
+    );
+    const candidates = await database.pool.query<{ id: string; status: string }>(
+      `
+        select id, status
+        from sp_post_candidates
+        order by id asc
+      `,
+    );
+
+    expect(runSelector).toHaveBeenCalledTimes(2);
+    expect(runDrafter).toHaveBeenCalledTimes(2);
+    expect(telegram.sentPackages).toHaveLength(1);
+    expect(telegram.sentPackages[0]?.draftText).toBe('Second attempt worked.');
+    expect(finalSlotState.rows).toEqual([
+      {
+        state_json: expect.objectContaining({
+          slotId: 'weekday-morning:2026-04-15',
+          status: 'completed',
+          outcome: 'draft_ready',
+          attemptCount: 2,
+          candidateId: '2',
+          errorDetails: null,
+        }),
+      },
+    ]);
+    expect(retryStateAfterSuccess.rows[0]?.count).toBe('0');
+    expect(candidates.rows).toEqual([
+      { id: '1', status: 'drafter_skipped' },
+      { id: '2', status: 'pending_approval' },
+    ]);
+  });
+
+  it('runs on-demand drafts through the shared pipeline without timer-based auto-post progression', async () => {
+    await seedEvents(database.pool, [
+      {
+        source: 'slack_message',
+        sourceId: 'slack-draft-now',
+        occurredAt: new Date('2026-04-15T12:55:00.000Z'),
+        author: 'dylanvu',
+        rawText: 'Draft this right now.',
+      },
+    ]);
+
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const syncSource = {
+      name: 'seeded-events',
+      sync: vi.fn(async () => []),
+    };
+    const runSelector = vi.fn(async (context: Awaited<ReturnType<typeof buildRecentContextPacket>>) => ({
+      decision: 'select' as const,
+      candidate_type: 'event_summary',
+      angle: 'Draft on demand',
+      why_interesting: 'On-demand drafts should share the same path',
+      source_event_ids: [requireValue(context.events[0], 'context.events[0]').id],
+      artifact_ids: [],
+      primary_anchor: 'The draft-now path reuses the orchestrator',
+      supporting_points: ['same selector', 'same drafter'],
+      quote_target: null,
+      suggested_media_kind: null,
+      suggested_media_request: null,
+    }));
+    const runDrafter = vi.fn(async () => ({
+      decision: 'success' as const,
+      delivery_kind: 'single_post' as const,
+      draft_text: 'On-demand draft ready for review.',
+      candidate_type: 'event_summary',
+      quote_target_url: null,
+      why_chosen: 'Draft-now should stop after package delivery.',
+      receipts: ['selector ok', 'drafter ok'],
+      media_request: null,
+      allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
+    }));
+
+    await runDraftNow({
+      db: database.pool,
+      telegramClient: telegram.client,
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+      now: () => atLocal('2026-04-15T13:00:00'),
+    });
+
+    expect(syncSource.sync).toHaveBeenCalledOnce();
+    expect(telegram.sentPackages).toHaveLength(1);
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson: [],
+      now: () => atLocal('2026-04-15T13:30:00'),
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+    });
+
+    const candidates = await database.pool.query<{
+      trigger_type: string;
+      status: string;
+      deadline_at: Date | null;
+    }>(
+      `
+        select trigger_type, status, deadline_at
+        from sp_post_candidates
+        order by id asc
+      `,
+    );
+
+    expect(candidates.rows).toEqual([
+      {
+        trigger_type: 'on_demand',
+        status: 'pending_approval',
+        deadline_at: null,
+      },
+    ]);
+    expect(telegram.sentPackages).toHaveLength(1);
+  });
+
+  it('applies skip and post-now as action-driven state transitions without publishing', async () => {
+    const candidatesRepository = createCandidatesRepository(database.pool);
+    const pendingCandidate = await candidatesRepository.createCandidate({
+      triggerType: 'scheduled',
+      candidateType: 'ship_update',
+      status: 'pending_approval',
+      deadlineAt: atLocal('2026-04-15T10:45:00'),
+      finalPostText: 'Pending draft',
+    });
+    const heldCandidate = await candidatesRepository.createCandidate({
+      triggerType: 'scheduled',
+      candidateType: 'ship_update',
+      status: 'held',
+      deadlineAt: atLocal('2026-04-15T10:45:00'),
+      finalPostText: 'Held draft',
+    });
+
+    const skipped = await applyCandidateAction({
+      db: database.pool,
+      candidateId: pendingCandidate.id,
+      action: 'skip',
+      now: () => atLocal('2026-04-15T10:31:00'),
+    });
+    const postRequested = await applyCandidateAction({
+      db: database.pool,
+      candidateId: heldCandidate.id,
+      action: 'post_now',
+      now: () => atLocal('2026-04-15T10:31:00'),
+    });
+
+    expect(skipped.candidate?.status).toBe('skipped');
+    expect(postRequested.candidate?.status).toBe('post_requested');
+  });
+
+  it('restricts edit actions to active approval states', async () => {
+    const candidatesRepository = createCandidatesRepository(database.pool);
+    const activeCandidate = await candidatesRepository.createCandidate({
+      triggerType: 'scheduled',
+      candidateType: 'ship_update',
+      status: 'pending_approval',
+      finalPostText: 'Pending draft',
+    });
+    const staleCandidate = await candidatesRepository.createCandidate({
+      triggerType: 'scheduled',
+      candidateType: 'ship_update',
+      status: 'skipped',
+      finalPostText: 'Stale draft',
+    });
+
+    const activeEdit = await applyCandidateAction({
+      db: database.pool,
+      candidateId: activeCandidate.id,
+      action: 'edit',
+      payload: 'Updated active draft',
+    });
+    const staleEdit = await applyCandidateAction({
+      db: database.pool,
+      candidateId: staleCandidate.id,
+      action: 'edit',
+      payload: 'This should be ignored',
+    });
+
+    const refreshedActiveCandidate = await getCandidateById(database.pool, activeCandidate.id);
+    const refreshedStaleCandidate = await getCandidateById(database.pool, staleCandidate.id);
+
+    expect(activeEdit.applied).toBe(true);
+    expect(refreshedActiveCandidate?.finalPostText).toBe('Updated active draft');
+    expect(staleEdit.applied).toBe(false);
+    expect(refreshedStaleCandidate?.finalPostText).toBe('Stale draft');
+  });
+
+  it('honors hold actions and suppresses future deadline-driven post progression', async () => {
+    await seedEvents(database.pool, [
+      {
+        source: 'github',
+        sourceId: 'github-hold-flow',
+        occurredAt: new Date('2026-04-15T09:55:00.000Z'),
+        author: 'dylanvu',
+        summary: 'Hold the scheduled candidate',
+      },
+    ]);
+
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const syncSource = {
+      name: 'seeded-events',
+      sync: vi.fn(async () => []),
+    };
+    const runSelector = vi.fn(async (context: Awaited<ReturnType<typeof buildRecentContextPacket>>) => ({
+      decision: 'select' as const,
+      candidate_type: 'ship_update',
+      angle: 'Allow hold before deadline',
+      why_interesting: 'Held drafts must not advance automatically',
+      source_event_ids: [requireValue(context.events[0], 'context.events[0]').id],
+      artifact_ids: [],
+      primary_anchor: 'A hold should stop the timer path',
+      supporting_points: ['hold action', 'deadline reached'],
+      quote_target: null,
+      suggested_media_kind: null,
+      suggested_media_request: null,
+    }));
+    const runDrafter = vi.fn(async () => ({
+      decision: 'success' as const,
+      delivery_kind: 'single_post' as const,
+      draft_text: 'Held draft ready for review.',
+      candidate_type: 'ship_update',
+      quote_target_url: null,
+      why_chosen: 'This candidate should pause cleanly.',
+      receipts: ['selector ok', 'drafter ok'],
+      media_request: null,
+      allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
+    }));
+    const windowsJson = [
+      {
+        name: 'weekday-morning',
+        days: ['wed'],
+        start: '10:00',
+        end: '11:00',
+      },
+    ];
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:30:00'),
+      randomFractionForSlot: () => 0.5,
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+    });
+
+    const initialMessage = requireValue(telegram.sentMessages[0], 'telegram.sentMessages[0]');
+    telegram.enqueueUpdates([
+      createControlReplyUpdate({
+        updateId: 91,
+        chatId: -1001234567890,
+        text: 'hold',
+        replyToMessage: initialMessage,
+      }),
+    ]);
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:32:00'),
+      randomFractionForSlot: () => 0.5,
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+    });
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:45:00'),
+      randomFractionForSlot: () => 0.5,
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+    });
+
+    const candidate = await getCandidateById(database.pool, '1');
+    const storedActions = await database.pool.query<{ action: string }>(
+      `
+        select action
+        from sp_telegram_actions
+        order by id asc
+      `,
+    );
+
+    expect(candidate?.status).toBe('held');
+    expect(storedActions.rows).toEqual([{ action: 'hold' }]);
+    expect(telegram.sentPackages).toHaveLength(1);
+  });
+
+  it('keeps dry-run ticks side-effect free for due slots and pending auto-post transitions', async () => {
+    await seedEvents(database.pool, [
+      {
+        source: 'github',
+        sourceId: 'github-dry-run',
+        occurredAt: new Date('2026-04-15T09:55:00.000Z'),
+        author: 'dylanvu',
+        summary: 'Dry-run should not persist a new candidate',
+      },
+    ]);
+
+    const candidatesRepository = createCandidatesRepository(database.pool);
+    const existingCandidate = await candidatesRepository.createCandidate({
+      triggerType: 'scheduled',
+      candidateType: 'ship_update',
+      status: 'pending_approval',
+      deadlineAt: atLocal('2026-04-15T10:45:00'),
+      finalPostText: 'Existing scheduled draft',
+    });
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const syncSource = {
+      name: 'seeded-events',
+      sync: vi.fn(async () => []),
+    };
+    const runSelector = vi.fn();
+    const runDrafter = vi.fn();
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson: [
+        {
+          name: 'weekday-morning',
+          days: ['wed'],
+          start: '10:00',
+          end: '11:00',
+        },
+      ],
+      now: () => atLocal('2026-04-15T10:45:00'),
+      randomFractionForSlot: () => 0.5,
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+      dryRun: true,
+    });
+
+    const candidate = await getCandidateById(database.pool, existingCandidate.id);
+    const candidateCount = await database.pool.query<{ count: string }>('select count(*) from sp_post_candidates');
+    const runtimeStateCount = await database.pool.query<{ count: string }>('select count(*) from sp_runtime_state');
+
+    expect(candidate?.status).toBe('pending_approval');
+    expect(candidateCount.rows[0]?.count).toBe('1');
+    expect(runtimeStateCount.rows[0]?.count).toBe('0');
+    expect(syncSource.sync).not.toHaveBeenCalled();
+    expect(runSelector).not.toHaveBeenCalled();
+    expect(runDrafter).not.toHaveBeenCalled();
+    expect(telegram.sentPackages).toHaveLength(0);
   });
 });
