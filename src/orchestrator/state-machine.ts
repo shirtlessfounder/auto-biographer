@@ -11,6 +11,7 @@ export type CandidateStatus =
   | 'held'
   | 'skipped'
   | 'post_requested'
+  | 'published'
   | 'delivery_failed';
 
 export type CandidateTimerEffect = 'send_reminder' | 'request_post' | null;

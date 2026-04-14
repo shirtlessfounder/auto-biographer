@@ -6,6 +6,8 @@ import { createTelegramActionsRepository } from '../db/repositories/telegram-act
 import type { Queryable } from '../db/pool';
 import type { XThreadLookupClient } from '../enrichment/x/client';
 import type { HermesExecutor } from '../hermes/run-hermes';
+import { publishCandidate } from '../publisher/publish-candidate';
+import type { publishToXViaScript } from '../publisher/x-command';
 import { createTelegramUpdatePoller } from '../telegram/poll-updates';
 import type { TelegramClient } from '../telegram/client';
 import { buildRecentContextPacket } from './context-builder';
@@ -52,6 +54,9 @@ export type RunTickInput = SharedDraftPipelineDependencies & {
   controlChatId: string;
   windowsJson: unknown[];
   randomFractionForSlot?: RandomFractionForSlot | undefined;
+  postProfile?: string | undefined;
+  clawdTweetScript?: string | undefined;
+  publishToX?: typeof publishToXViaScript | undefined;
 };
 
 export type RunTickResult = {
@@ -482,6 +487,30 @@ async function sendReminder(input: {
   return true;
 }
 
+async function publishRequestedCandidate(input: {
+  db: Queryable;
+  telegramClient: TelegramClient;
+  candidateId: string;
+  postProfile?: string | undefined;
+  clawdTweetScript?: string | undefined;
+  now: () => Date;
+  publishToX?: typeof publishToXViaScript | undefined;
+}): Promise<void> {
+  if (!input.postProfile || !input.clawdTweetScript) {
+    throw new Error('postProfile and clawdTweetScript are required when publishing');
+  }
+
+  await publishCandidate({
+    db: input.db,
+    telegramClient: input.telegramClient,
+    candidateId: input.candidateId,
+    postProfile: input.postProfile,
+    clawdTweetScript: input.clawdTweetScript,
+    now: input.now,
+    publishToX: input.publishToX,
+  });
+}
+
 export async function runTick(input: RunTickInput): Promise<RunTickResult> {
   const now = input.now ?? (() => new Date());
   const dryRun = input.dryRun ?? false;
@@ -539,13 +568,26 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
   const polled = await poller.pollUpdates();
 
   for (const action of polled.actions) {
-    await applyCandidateAction({
+    const actionResult = await applyCandidateAction({
       db: input.db,
       candidateId: action.candidateId,
       action: action.action,
       payload: action.payload,
       now,
     });
+
+    if (actionResult.candidate?.status === 'post_requested') {
+      await publishRequestedCandidate({
+        db: input.db,
+        telegramClient: input.telegramClient,
+        candidateId: actionResult.candidate.id,
+        postProfile: input.postProfile,
+        clawdTweetScript: input.clawdTweetScript,
+        now,
+        publishToX: input.publishToX,
+      });
+      postRequestedCandidateIds.push(actionResult.candidate.id);
+    }
   }
 
   for (const slot of dueSlots) {
@@ -648,6 +690,15 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
       });
 
       if (transitioned) {
+        await publishRequestedCandidate({
+          db: input.db,
+          telegramClient: input.telegramClient,
+          candidateId: transitioned.id,
+          postProfile: input.postProfile,
+          clawdTweetScript: input.clawdTweetScript,
+          now,
+          publishToX: input.publishToX,
+        });
         postRequestedCandidateIds.push(candidate.id);
       }
     }

@@ -248,21 +248,36 @@ function createStubTelegramClient(input: { chatId: number }) {
       return queuedUpdates.shift() ?? [];
     },
 
-    async sendCandidatePackage(candidatePackage) {
-      sentPackages.push(candidatePackage);
-      const message: TelegramMessage = {
+    async sendMessage(message) {
+      const sentMessage: TelegramMessage = {
         message_id: nextMessageId,
         chat: {
           id: input.chatId,
           type: 'private',
         },
         date: Math.floor(Date.now() / 1000),
-        text: formatCandidatePackageMessage(candidatePackage),
+        text: message.text,
       };
 
       nextMessageId += 1;
-      sentMessages.push(message);
-      return message;
+      sentMessages.push(sentMessage);
+      return sentMessage;
+    },
+
+    async sendCandidatePackage(candidatePackage) {
+      sentPackages.push(candidatePackage);
+      return this.sendMessage({
+        text: formatCandidatePackageMessage(candidatePackage),
+        disableWebPagePreview: true,
+      });
+    },
+
+    async getFile(fileId) {
+      return {
+        fileId,
+        filePath: `${fileId}.jpg`,
+        downloadUrl: `https://example.com/${fileId}.jpg`,
+      };
     },
   };
 
@@ -1842,5 +1857,100 @@ describe('orchestrator Task 10 flow', () => {
       ],
     });
     expect(ignoredCandidate?.mediaBatchJson).toBeNull();
+  });
+
+  it('publishes immediately when a post-now reply transitions a candidate to post_requested', async () => {
+    const candidatesRepository = createCandidatesRepository(database.pool);
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const publishToX = vi.fn(async () => ({
+      tweetId: '1900000000000000101',
+      url: 'https://x.com/bicep_pump/status/1900000000000000101',
+      raw: { ok: true, tweetId: '1900000000000000101' },
+    }));
+    const candidate = await candidatesRepository.createCandidate({
+      triggerType: 'scheduled',
+      candidateType: 'ship_update',
+      status: 'pending_approval',
+      deadlineAt: atLocal('2026-04-15T10:45:00'),
+      finalPostText: 'Publish this immediately.',
+      telegramMessageId: '8000',
+    });
+
+    telegram.enqueueUpdates([
+      createControlReplyUpdate({
+        updateId: 150,
+        chatId: -1001234567890,
+        text: 'post now',
+        replyToMessage: {
+          message_id: 8000,
+          chat: {
+            id: -1001234567890,
+            type: 'private',
+          },
+          text: `Candidate #${candidate.id}\nDraft:\nPublish this immediately.`,
+        },
+      }),
+    ]);
+
+    const result = await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson: [],
+      now: () => atLocal('2026-04-15T10:31:00'),
+      syncSources: [],
+      postProfile: 'bicep_pump',
+      clawdTweetScript: '/srv/clawd/scripts/tweet.js',
+      publishToX,
+    });
+
+    const candidateRow = await getCandidateById(database.pool, candidate.id);
+    const publishedPosts = await database.pool.query<{ count: string }>(
+      'select count(*) from sp_published_posts',
+    );
+
+    expect(result.postRequestedCandidateIds).toEqual([candidate.id]);
+    expect(candidateRow?.status).toBe('published');
+    expect(publishedPosts.rows[0]?.count).toBe('1');
+    expect(publishToX).toHaveBeenCalledOnce();
+  });
+
+  it('publishes immediately when a pending candidate reaches its deadline', async () => {
+    const candidatesRepository = createCandidatesRepository(database.pool);
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const publishToX = vi.fn(async () => ({
+      tweetId: '1900000000000000102',
+      url: 'https://x.com/bicep_pump/status/1900000000000000102',
+      raw: { ok: true, tweetId: '1900000000000000102' },
+    }));
+    const candidate = await candidatesRepository.createCandidate({
+      triggerType: 'scheduled',
+      candidateType: 'ship_update',
+      status: 'pending_approval',
+      deadlineAt: atLocal('2026-04-15T10:30:00'),
+      finalPostText: 'Deadline reached publish.',
+    });
+
+    const result = await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson: [],
+      now: () => atLocal('2026-04-15T10:30:00'),
+      syncSources: [],
+      postProfile: 'bicep_pump',
+      clawdTweetScript: '/srv/clawd/scripts/tweet.js',
+      publishToX,
+    });
+
+    const candidateRow = await getCandidateById(database.pool, candidate.id);
+    const publishedPosts = await database.pool.query<{ count: string }>(
+      'select count(*) from sp_published_posts',
+    );
+
+    expect(result.postRequestedCandidateIds).toEqual([candidate.id]);
+    expect(candidateRow?.status).toBe('published');
+    expect(publishedPosts.rows[0]?.count).toBe('1');
+    expect(publishToX).toHaveBeenCalledOnce();
   });
 });

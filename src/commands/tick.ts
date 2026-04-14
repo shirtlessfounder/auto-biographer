@@ -81,6 +81,8 @@ export async function runTickCommand(argv: string[] = process.argv.slice(2)): Pr
       syncSources: buildSyncSources({ db: pool, env }),
       hermesBin: env.hermesBin,
       xLookupClient,
+      postProfile: env.postProfile,
+      clawdTweetScript: env.clawdTweetScript,
       dryRun: args.dryRun,
     });
 

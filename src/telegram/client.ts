@@ -54,9 +54,22 @@ export type GetTelegramUpdatesInput = {
 
 export type SendCandidatePackageInput = CandidatePackageMessageInput;
 
+export type SendTelegramMessageInput = {
+  text: string;
+  disableWebPagePreview?: boolean | undefined;
+};
+
+export type TelegramFile = {
+  fileId: string;
+  filePath: string;
+  downloadUrl: string;
+};
+
 export type TelegramClient = {
   getUpdates(input?: GetTelegramUpdatesInput | undefined): Promise<TelegramUpdate[]>;
+  sendMessage(input: SendTelegramMessageInput): Promise<TelegramMessage>;
   sendCandidatePackage(input: SendCandidatePackageInput): Promise<TelegramMessage>;
+  getFile(fileId: string): Promise<TelegramFile>;
 };
 
 type FetchLike = typeof fetch;
@@ -109,6 +122,11 @@ const TelegramUpdateSchema = z.object({
   message: TelegramMessageSchema.optional(),
 });
 
+const TelegramFileSchema = z.object({
+  file_id: z.string(),
+  file_path: z.string(),
+});
+
 const TelegramApiErrorSchema = z.object({
   ok: z.literal(false),
   description: z.string().optional(),
@@ -126,6 +144,12 @@ function buildTelegramApiUrl(apiBaseUrl: string, botToken: string, method: strin
   const normalizedBaseUrl = apiBaseUrl.endsWith('/') ? apiBaseUrl.slice(0, -1) : apiBaseUrl;
 
   return `${normalizedBaseUrl}/bot${botToken}/${method}`;
+}
+
+function buildTelegramFileUrl(apiBaseUrl: string, botToken: string, filePath: string): string {
+  const normalizedBaseUrl = apiBaseUrl.endsWith('/') ? apiBaseUrl.slice(0, -1) : apiBaseUrl;
+
+  return `${normalizedBaseUrl}/file/bot${botToken}/${filePath}`;
 }
 
 async function requestTelegramApi<Result>(input: {
@@ -199,7 +223,7 @@ export function createTelegramClient(input: CreateTelegramClientInput): Telegram
       });
     },
 
-    async sendCandidatePackage(candidatePackage: SendCandidatePackageInput): Promise<TelegramMessage> {
+    async sendMessage(message: SendTelegramMessageInput): Promise<TelegramMessage> {
       return requestTelegramApi({
         apiBaseUrl,
         botToken: input.botToken,
@@ -207,11 +231,37 @@ export function createTelegramClient(input: CreateTelegramClientInput): Telegram
         fetchFn,
         body: {
           chat_id: input.chatId,
-          text: formatCandidatePackageMessage(candidatePackage),
-          disable_web_page_preview: true,
+          text: message.text,
+          disable_web_page_preview: message.disableWebPagePreview ?? false,
         },
         resultSchema: TelegramMessageSchema,
       });
+    },
+
+    async sendCandidatePackage(candidatePackage: SendCandidatePackageInput): Promise<TelegramMessage> {
+      return this.sendMessage({
+        text: formatCandidatePackageMessage(candidatePackage),
+        disableWebPagePreview: true,
+      });
+    },
+
+    async getFile(fileId: string): Promise<TelegramFile> {
+      const result = await requestTelegramApi({
+        apiBaseUrl,
+        botToken: input.botToken,
+        method: 'getFile',
+        fetchFn,
+        body: {
+          file_id: fileId,
+        },
+        resultSchema: TelegramFileSchema,
+      });
+
+      return {
+        fileId: result.file_id,
+        filePath: result.file_path,
+        downloadUrl: buildTelegramFileUrl(apiBaseUrl, input.botToken, result.file_path),
+      };
     },
   };
 }
