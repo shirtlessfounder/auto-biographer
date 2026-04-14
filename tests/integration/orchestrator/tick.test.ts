@@ -304,6 +304,45 @@ function createControlReplyUpdate(input: {
   };
 }
 
+function createPhotoReplyUpdate(input: {
+  updateId: number;
+  chatId: number;
+  messageId: number;
+  replyMessageId: number;
+  mediaGroupId?: string | null | undefined;
+  photoIds: Array<{
+    fileId: string;
+    fileUniqueId: string;
+    width: number;
+    height: number;
+  }>;
+}): TelegramUpdate {
+  return {
+    update_id: input.updateId,
+    message: {
+      message_id: input.messageId,
+      chat: {
+        id: input.chatId,
+        type: 'private',
+      },
+      from: {
+        id: 42,
+        is_bot: false,
+      },
+      media_group_id: input.mediaGroupId ?? undefined,
+      photo: input.photoIds.map((photo) => ({
+        file_id: photo.fileId,
+        file_unique_id: photo.fileUniqueId,
+        width: photo.width,
+        height: photo.height,
+      })),
+      reply_to_message: {
+        message_id: input.replyMessageId,
+      },
+    },
+  };
+}
+
 describe('orchestrator Task 10 flow', () => {
   let database: TestDatabase;
 
@@ -1679,5 +1718,129 @@ describe('orchestrator Task 10 flow', () => {
     expect(runSelector).not.toHaveBeenCalled();
     expect(runDrafter).not.toHaveBeenCalled();
     expect(telegram.sentPackages).toHaveLength(0);
+  });
+
+  it('persists candidate telegram message ids and captures reply photo batches before publish', async () => {
+    await seedEvents(database.pool, [
+      {
+        source: 'github',
+        sourceId: 'github-photo-capture',
+        occurredAt: new Date('2026-04-15T10:10:00.000Z'),
+        author: 'dylanvu',
+        summary: 'Fresh GitHub activity for photo capture',
+      },
+    ]);
+
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const syncSource = {
+      name: 'seeded-events',
+      sync: vi.fn(async () => []),
+    };
+    const runSelector = vi.fn(async () => ({
+      decision: 'select' as const,
+      candidate_type: 'ship_update',
+      angle: 'Photo capture test',
+      why_interesting: 'Need a reply-target message id before publish.',
+      source_event_ids: [1],
+      artifact_ids: [],
+      primary_anchor: 'anchor',
+      supporting_points: ['point'],
+      quote_target: null,
+      suggested_media_kind: 'image',
+      suggested_media_request: 'send a screenshot',
+    }));
+    const runDrafter = vi.fn(async () => ({
+      decision: 'success' as const,
+      delivery_kind: 'single_post' as const,
+      draft_text: 'Draft that should accept reply photos.',
+      candidate_type: 'ship_update',
+      quote_target_url: null,
+      why_chosen: 'Need a pending candidate for media capture.',
+      receipts: ['selector ok'],
+      media_request: 'send a screenshot',
+      allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
+    }));
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson: [
+        {
+          name: 'weekday-morning',
+          days: ['wed'],
+          start: '10:00',
+          end: '11:00',
+        },
+      ],
+      now: () => atLocal('2026-04-15T10:30:00'),
+      randomFractionForSlot: () => 0.5,
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+    });
+
+    const initialMessage = requireValue(telegram.sentMessages[0], 'telegram.sentMessages[0]');
+    const draftedCandidate = await getCandidateById(database.pool, '1');
+
+    expect(draftedCandidate?.status).toBe('pending_approval');
+    expect(draftedCandidate?.telegramMessageId).toBe(String(initialMessage.message_id));
+
+    const candidatesRepository = createCandidatesRepository(database.pool);
+    const lateCandidate = await candidatesRepository.createCandidate({
+      triggerType: 'manual',
+      candidateType: 'ship_update',
+      status: 'post_requested',
+      finalPostText: 'Already past the publish boundary',
+      telegramMessageId: '9001',
+    });
+
+    telegram.enqueueUpdates([
+      createPhotoReplyUpdate({
+        updateId: 101,
+        chatId: -1001234567890,
+        messageId: 901,
+        replyMessageId: initialMessage.message_id,
+        mediaGroupId: 'album-1',
+        photoIds: [
+          { fileId: 'small', fileUniqueId: 'photo-1', width: 320, height: 180 },
+          { fileId: 'large', fileUniqueId: 'photo-1', width: 1280, height: 720 },
+        ],
+      }),
+      createPhotoReplyUpdate({
+        updateId: 102,
+        chatId: -1001234567890,
+        messageId: 902,
+        replyMessageId: 9001,
+        photoIds: [
+          { fileId: 'ignored', fileUniqueId: 'photo-2', width: 1440, height: 900 },
+        ],
+      }),
+    ]);
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson: [],
+      now: () => atLocal('2026-04-15T10:32:00'),
+      syncSources: [syncSource],
+      runSelector,
+      runDrafter,
+    });
+
+    const capturedCandidate = await getCandidateById(database.pool, '1');
+    const ignoredCandidate = await getCandidateById(database.pool, lateCandidate.id);
+
+    expect(capturedCandidate?.mediaBatchJson).toEqual({
+      kind: 'telegram_photo_batch',
+      replyMessageId: initialMessage.message_id,
+      mediaGroupId: 'album-1',
+      capturedAt: '2026-04-15T14:32:00.000Z',
+      photos: [
+        { fileId: 'large', fileUniqueId: 'photo-1', width: 1280, height: 720 },
+      ],
+    });
+    expect(ignoredCandidate?.mediaBatchJson).toBeNull();
   });
 });

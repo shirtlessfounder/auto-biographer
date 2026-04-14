@@ -16,11 +16,22 @@ export type TelegramChat = {
   type: string;
 };
 
+export type TelegramPhotoSize = {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number | undefined;
+};
+
 export type TelegramMessage = {
   message_id: number;
   chat: TelegramChat;
   date?: number | undefined;
   text?: string | undefined;
+  caption?: string | undefined;
+  media_group_id?: string | undefined;
+  photo?: TelegramPhotoSize[] | undefined;
   from?: TelegramUser | undefined;
   reply_to_message?:
     | {
@@ -73,11 +84,22 @@ const TelegramReplyMessageSchema = z.object({
   text: z.string().optional(),
 });
 
+const TelegramPhotoSizeSchema = z.object({
+  file_id: z.string(),
+  file_unique_id: z.string(),
+  width: z.number().int(),
+  height: z.number().int(),
+  file_size: z.number().int().optional(),
+});
+
 const TelegramMessageSchema = z.object({
   message_id: z.number().int(),
   chat: TelegramChatSchema,
   date: z.number().int().optional(),
   text: z.string().optional(),
+  caption: z.string().optional(),
+  media_group_id: z.string().optional(),
+  photo: z.array(TelegramPhotoSizeSchema).optional(),
   from: TelegramUserSchema.optional(),
   reply_to_message: TelegramReplyMessageSchema.optional(),
 });

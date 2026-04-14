@@ -413,13 +413,16 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
   }
 
   try {
-    await input.telegramClient.sendCandidatePackage({
+    const sentMessage = await input.telegramClient.sendCandidatePackage({
       candidateId: drafted.package.candidateId,
       candidateType: drafted.package.candidateType,
       deadlineAt: drafted.package.deadlineAt,
       draftText: drafted.package.draftText,
       mediaRequest: drafted.package.mediaRequest,
       quoteTargetUrl: drafted.package.quoteTargetUrl,
+    });
+    await candidatesRepository.updateCandidate(drafted.candidate.id, {
+      telegramMessageId: String(sentMessage.message_id),
     });
   } catch (error) {
     await markDeliveryFailed({
@@ -453,14 +456,19 @@ async function sendReminder(input: {
   quoteTargetUrl: string | null;
   now: () => Date;
 }): Promise<boolean> {
+  const candidatesRepository = createCandidatesRepository(input.db);
+
   try {
-    await input.telegramClient.sendCandidatePackage({
+    const sentMessage = await input.telegramClient.sendCandidatePackage({
       candidateId: input.candidateId,
       candidateType: input.candidateType,
       deadlineAt: input.deadlineAt,
       draftText: input.draftText ?? '',
       mediaRequest: input.mediaRequest,
       quoteTargetUrl: input.quoteTargetUrl,
+    });
+    await candidatesRepository.updateCandidate(input.candidateId, {
+      telegramMessageId: String(sentMessage.message_id),
     });
   } catch {
     return false;
@@ -524,7 +532,9 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
     client: input.telegramClient,
     runtimeStateRepository,
     telegramActionsRepository,
+    candidateMediaRepository: createCandidatesRepository(input.db),
     controlChatId: input.controlChatId,
+    now,
   });
   const polled = await poller.pollUpdates();
 
