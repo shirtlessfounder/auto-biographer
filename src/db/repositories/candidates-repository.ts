@@ -12,6 +12,8 @@ export type CandidateRecord = {
   finalPostText: string | null;
   quoteTargetUrl: string | null;
   mediaRequest: string | null;
+  telegramMessageId: string | null;
+  mediaBatchJson: unknown;
   degraded: boolean;
   errorDetails: string | null;
   createdAt: Date;
@@ -29,6 +31,8 @@ export type CreateCandidateInput = {
   finalPostText?: string | null | undefined;
   quoteTargetUrl?: string | null | undefined;
   mediaRequest?: string | null | undefined;
+  telegramMessageId?: string | null | undefined;
+  mediaBatchJson?: unknown;
   degraded?: boolean | undefined;
   errorDetails?: string | null | undefined;
 };
@@ -41,6 +45,8 @@ export type CandidateUpdateInput = {
   finalPostText?: string | null | undefined;
   quoteTargetUrl?: string | null | undefined;
   mediaRequest?: string | null | undefined;
+  telegramMessageId?: string | null | undefined;
+  mediaBatchJson?: unknown;
   degraded?: boolean | undefined;
   errorDetails?: string | null | undefined;
 };
@@ -63,6 +69,8 @@ type CandidateRow = {
   final_post_text: string | null;
   quote_target_url: string | null;
   media_request: string | null;
+  telegram_message_id: string | null;
+  media_batch_json: unknown;
   degraded: boolean;
   error_details: string | null;
   created_at: Date;
@@ -90,6 +98,8 @@ function mapCandidateRow(row: CandidateRow): CandidateRecord {
     finalPostText: row.final_post_text,
     quoteTargetUrl: row.quote_target_url,
     mediaRequest: row.media_request,
+    telegramMessageId: row.telegram_message_id,
+    mediaBatchJson: row.media_batch_json,
     degraded: row.degraded,
     errorDetails: row.error_details,
     createdAt: row.created_at,
@@ -137,6 +147,16 @@ function buildMutableAssignments(
     assignments.push(`media_request = $${String(values.length)}`);
   }
 
+  if (hasOwn(input, 'telegramMessageId')) {
+    values.push(input.telegramMessageId ?? null);
+    assignments.push(`telegram_message_id = $${String(values.length)}`);
+  }
+
+  if (hasOwn(input, 'mediaBatchJson')) {
+    values.push(toJsonbValue(input.mediaBatchJson ?? null));
+    assignments.push(`media_batch_json = $${String(values.length)}`);
+  }
+
   if (hasOwn(input, 'degraded')) {
     values.push(input.degraded ?? false);
     assignments.push(`degraded = $${String(values.length)}`);
@@ -164,10 +184,12 @@ export function createCandidatesRepository(db: Queryable) {
             final_post_text,
             quote_target_url,
             media_request,
+            telegram_message_id,
+            media_batch_json,
             degraded,
             error_details
           )
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
           returning
             id,
             trigger_type,
@@ -180,6 +202,8 @@ export function createCandidatesRepository(db: Queryable) {
             final_post_text,
             quote_target_url,
             media_request,
+            telegram_message_id,
+            media_batch_json,
             degraded,
             error_details,
             created_at,
@@ -196,6 +220,8 @@ export function createCandidatesRepository(db: Queryable) {
           input.finalPostText ?? null,
           input.quoteTargetUrl ?? null,
           input.mediaRequest ?? null,
+          input.telegramMessageId ?? null,
+          toJsonbValue(input.mediaBatchJson ?? null),
           input.degraded ?? false,
           input.errorDetails ?? null,
         ],
@@ -234,6 +260,8 @@ export function createCandidatesRepository(db: Queryable) {
             final_post_text,
             quote_target_url,
             media_request,
+            telegram_message_id,
+            media_batch_json,
             degraded,
             error_details,
             created_at,
@@ -280,12 +308,61 @@ export function createCandidatesRepository(db: Queryable) {
             final_post_text,
             quote_target_url,
             media_request,
+            telegram_message_id,
+            media_batch_json,
             degraded,
             error_details,
             created_at,
             updated_at
         `,
         values,
+      );
+
+      const row = result.rows[0];
+
+      return row ? mapCandidateRow(row) : null;
+    },
+
+    async replaceMediaBatchByTelegramMessageId(input: {
+      telegramMessageId: string;
+      allowedStatuses: string[];
+      mediaBatchJson: unknown;
+    }): Promise<CandidateRecord | null> {
+      if (input.allowedStatuses.length === 0) {
+        throw new Error('allowedStatuses must include at least one status');
+      }
+
+      const result = await db.query<CandidateRow>(
+        `
+          update sp_post_candidates
+          set media_batch_json = $3,
+              updated_at = now()
+          where telegram_message_id = $1
+            and status = any($2::text[])
+          returning
+            id,
+            trigger_type,
+            candidate_type,
+            status,
+            deadline_at,
+            reminder_sent_at,
+            selector_output_json,
+            drafter_output_json,
+            final_post_text,
+            quote_target_url,
+            media_request,
+            telegram_message_id,
+            media_batch_json,
+            degraded,
+            error_details,
+            created_at,
+            updated_at
+        `,
+        [
+          input.telegramMessageId,
+          input.allowedStatuses,
+          toJsonbValue(input.mediaBatchJson),
+        ],
       );
 
       const row = result.rows[0];

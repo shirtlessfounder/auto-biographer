@@ -32,6 +32,8 @@ type CandidateRow = {
   final_post_text: string | null;
   quote_target_url: string | null;
   media_request: string | null;
+  telegram_message_id: string | null;
+  media_batch_json: unknown;
   degraded: boolean;
   error_details: string | null;
   created_at: Date;
@@ -55,6 +57,8 @@ function mapCandidateRow(row: CandidateRow): CandidateRecord {
     finalPostText: row.final_post_text,
     quoteTargetUrl: row.quote_target_url,
     mediaRequest: row.media_request,
+    telegramMessageId: row.telegram_message_id,
+    mediaBatchJson: row.media_batch_json,
     degraded: row.degraded,
     errorDetails: row.error_details,
     createdAt: row.created_at,
@@ -85,6 +89,8 @@ export async function getCandidateById(db: Queryable, candidateId: string): Prom
         final_post_text,
         quote_target_url,
         media_request,
+        telegram_message_id,
+        media_batch_json,
         degraded,
         error_details,
         created_at,
@@ -114,6 +120,8 @@ export async function listCandidatesForAutomation(db: Queryable): Promise<Candid
         final_post_text,
         quote_target_url,
         media_request,
+        telegram_message_id,
+        media_batch_json,
         degraded,
         error_details,
         created_at,

@@ -196,6 +196,16 @@ describe('runMigrations', () => {
         and table_name like 'sp_%'
       order by table_name asc
     `);
+    const candidateColumns = await database.pool.query<{
+      column_name: string;
+      data_type: string;
+    }>(`
+      select column_name, data_type
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'sp_post_candidates'
+      order by column_name asc
+    `);
 
     expect(result.rows.map((row) => row.table_name)).toEqual([
       'sp_artifacts',
@@ -207,5 +217,11 @@ describe('runMigrations', () => {
       'sp_source_usage',
       'sp_telegram_actions',
     ]);
+    expect(candidateColumns.rows).toEqual(
+      expect.arrayContaining([
+        { column_name: 'media_batch_json', data_type: 'jsonb' },
+        { column_name: 'telegram_message_id', data_type: 'bigint' },
+      ]),
+    );
   });
 });

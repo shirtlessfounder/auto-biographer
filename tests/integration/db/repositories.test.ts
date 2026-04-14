@@ -182,6 +182,23 @@ describe('database repositories', () => {
 
   it('creates candidates, updates fields, and transitions status atomically', async () => {
     const candidatesRepository = createCandidatesRepository(database.pool);
+    const firstMediaBatch = {
+      kind: 'telegram_photo_batch',
+      replyMessageId: 9001,
+      mediaGroupId: null,
+      capturedAt: '2026-04-14T21:30:00.000Z',
+      photos: [{ fileId: 'file-1', fileUniqueId: 'uniq-1', width: 1280, height: 720 }],
+    };
+    const nextMediaBatch = {
+      kind: 'telegram_photo_batch',
+      replyMessageId: 9001,
+      mediaGroupId: 'album-1',
+      capturedAt: '2026-04-14T21:45:00.000Z',
+      photos: [
+        { fileId: 'file-2', fileUniqueId: 'uniq-2', width: 1440, height: 900 },
+        { fileId: 'file-3', fileUniqueId: 'uniq-3', width: 1600, height: 1200 },
+      ],
+    };
 
     const created = await candidatesRepository.createCandidate({
       triggerType: 'scheduled',
@@ -195,6 +212,8 @@ describe('database repositories', () => {
       finalPostText: 'hello world',
       quoteTargetUrl: 'https://x.com/example/status/1',
       mediaRequest: 'none',
+      telegramMessageId: '9001',
+      mediaBatchJson: firstMediaBatch,
       degraded: true,
     });
     const transitioned = await candidatesRepository.transitionStatus({
@@ -208,13 +227,21 @@ describe('database repositories', () => {
       fromStatuses: ['drafting'],
       toStatus: 'published',
     });
+    const replaced = await candidatesRepository.replaceMediaBatchByTelegramMessageId({
+      telegramMessageId: '9001',
+      allowedStatuses: ['pending_approval', 'reminded', 'held'],
+      mediaBatchJson: nextMediaBatch,
+    });
 
     expect(updated.finalPostText).toBe('hello world');
     expect(updated.quoteTargetUrl).toBe('https://x.com/example/status/1');
+    expect(updated.telegramMessageId).toBe('9001');
+    expect(updated.mediaBatchJson).toEqual(firstMediaBatch);
     expect(updated.degraded).toBe(true);
     expect(transitioned?.status).toBe('pending_approval');
     expect(transitioned?.reminderSentAt?.toISOString()).toBe('2026-04-05T12:10:00.000Z');
     expect(rejectedTransition).toBeNull();
+    expect(replaced?.mediaBatchJson).toEqual(nextMediaBatch);
   });
 
   it('gets and sets runtime state', async () => {
