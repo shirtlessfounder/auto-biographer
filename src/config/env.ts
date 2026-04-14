@@ -54,6 +54,7 @@ const EnvSchema = z.object({
   TELEGRAM_CONTROL_BOT_TOKEN: z.string().min(1),
   TELEGRAM_CONTROL_CHAT_ID: z.string().regex(/^-?\d+$/),
   HERMES_BIN: z.string().min(1),
+  X_BEARER_TOKEN: z.string().min(1),
   GITHUB_USERNAME: z.string().min(1),
   INNIES_BUYER_KEY_NAME: z.string().min(1),
   SLACK_AUTHOR_NAMES: CsvListSchema,
@@ -68,6 +69,7 @@ export type AppEnv = {
   telegramControlBotToken: string;
   telegramControlChatId: string;
   hermesBin: string;
+  xBearerToken: string;
   githubUsername: string;
   inniesBuyerKeyName: string;
   slackAuthorNames: string[];
@@ -85,6 +87,7 @@ export function loadEnv(input: Record<string, string | undefined> = process.env)
     telegramControlBotToken: parsed.TELEGRAM_CONTROL_BOT_TOKEN,
     telegramControlChatId: parsed.TELEGRAM_CONTROL_CHAT_ID,
     hermesBin: parsed.HERMES_BIN,
+    xBearerToken: parsed.X_BEARER_TOKEN,
     githubUsername: parsed.GITHUB_USERNAME,
     inniesBuyerKeyName: parsed.INNIES_BUYER_KEY_NAME,
     slackAuthorNames: parsed.SLACK_AUTHOR_NAMES,
