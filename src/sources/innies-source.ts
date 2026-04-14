@@ -11,6 +11,7 @@ type InniesSource = {
 
 type InniesSourceOptions = {
   buyerKeyName: string;
+  lookbackHours?: number;
 };
 
 type InniesConversationRow = {
@@ -516,6 +517,10 @@ const LOAD_INNIES_ROWS_SQL = `
   left join in_raw_blobs rb
     on rb.id = raw_link.raw_blob_id
   where k.name = $1
+    and (
+      $2::integer is null
+      or s.last_activity_at >= now() - ($2::integer * interval '1 hour')
+    )
   order by
     s.last_activity_at asc,
     s.session_key asc,
@@ -533,7 +538,10 @@ export function createInniesSource(
 ): InniesSource {
   return {
     async sync(): Promise<UpsertedNormalizedEvent[]> {
-      const result = await db.query<InniesConversationRow>(LOAD_INNIES_ROWS_SQL, [options.buyerKeyName]);
+      const result = await db.query<InniesConversationRow>(LOAD_INNIES_ROWS_SQL, [
+        options.buyerKeyName,
+        options.lookbackHours ?? null,
+      ]);
       const events = groupRowsBySession(result.rows).map((session) => buildSessionEvent(session));
 
       return upsertEvents(db, events);

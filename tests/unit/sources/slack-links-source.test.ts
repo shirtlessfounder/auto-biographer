@@ -292,4 +292,76 @@ describe('createSlackLinksSource', () => {
       },
     ]);
   });
+
+  it('limits imported slack links to the configured rolling lookback window', async () => {
+    const now = Date.now();
+
+    await database.pool.query(
+      `
+        insert into sl_links (
+          url,
+          canonical_url,
+          final_url,
+          domain,
+          raw_payload,
+          first_seen_at,
+          captured_at,
+          slack_channel_name,
+          slack_user_id,
+          slack_message_ts,
+          slack_permalink
+        )
+        values
+          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11),
+          ($12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+      `,
+      [
+        'https://example.com/old',
+        'https://example.com/old',
+        'https://example.com/old',
+        'example.com',
+        JSON.stringify({ capture: 'old' }),
+        new Date(now - 30 * 60 * 60 * 1000),
+        new Date(now - 30 * 60 * 60 * 1000),
+        'shiproom',
+        'U12345',
+        '1713067200.000100',
+        'https://slack.com/archives/C123/p1713067200000100',
+        'https://example.com/recent',
+        'https://example.com/recent',
+        'https://example.com/recent?ref=slack',
+        'example.com',
+        JSON.stringify({ capture: 'recent' }),
+        new Date(now - 2 * 60 * 60 * 1000),
+        new Date(now - 2 * 60 * 60 * 1000),
+        'shiproom',
+        'U12345',
+        '1713175200.000100',
+        'https://slack.com/archives/C123/p1713175200000100',
+      ],
+    );
+
+    const source = createSlackLinksSource(database.pool, {
+      authorNames: ['Dylan Vu'],
+      authorUserIds: ['U12345'],
+      lookbackHours: 12,
+    });
+
+    await source.sync();
+
+    const events = await database.pool.query<{ source_id: string; url_or_locator: string | null }>(
+      `
+        select source_id, url_or_locator
+        from sp_events
+        order by source_id
+      `,
+    );
+
+    expect(events.rows).toEqual([
+      {
+        source_id: '2',
+        url_or_locator: 'https://example.com/recent',
+      },
+    ]);
+  });
 });

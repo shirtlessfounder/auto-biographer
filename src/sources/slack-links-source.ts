@@ -6,6 +6,7 @@ import type { NormalizedArtifactInput, NormalizedEventInput } from '../normaliza
 type SlackAuthorFilters = {
   authorNames: readonly string[];
   authorUserIds: readonly string[];
+  lookbackHours?: number;
 };
 
 type SlackLinkRow = Record<string, unknown> & {
@@ -15,6 +16,16 @@ type SlackLinkRow = Record<string, unknown> & {
 type SlackLinksSource = {
   sync(): Promise<UpsertedNormalizedEvent[]>;
 };
+
+const LOAD_SLACK_LINKS_SQL = `
+  select *
+  from sl_links
+  where (
+    $1::integer is null
+    or coalesce(first_seen_at, captured_at) >= now() - ($1::integer * interval '1 hour')
+  )
+  order by id asc
+`;
 
 const SLACK_LINK_AUTHOR_NAME_KEYS = [
   'slack_user_name',
@@ -202,7 +213,7 @@ export function createSlackLinksSource(
 ): SlackLinksSource {
   return {
     async sync(): Promise<UpsertedNormalizedEvent[]> {
-      const result = await db.query<SlackLinkRow>('select * from sl_links order by id asc');
+      const result = await db.query<SlackLinkRow>(LOAD_SLACK_LINKS_SQL, [filters.lookbackHours ?? null]);
       const events = result.rows
         .map((row) => normalizeSlackLinkRow(row, filters))
         .filter((event): event is NormalizedEventInput => event !== null);

@@ -10,6 +10,8 @@ import { createSlackLinksSource } from '../sources/slack-links-source';
 import { createSlackMessagesSource } from '../sources/slack-messages-source';
 import { createTelegramClient } from '../telegram/client';
 
+const SOURCE_SYNC_LOOKBACK_HOURS = 12;
+
 function buildSyncSources(input: {
   db: Parameters<typeof createGitHubSource>[0];
   env: AppEnv;
@@ -21,6 +23,7 @@ function buildSyncSources(input: {
         createSlackMessagesSource(input.db, {
           authorNames: input.env.slackAuthorNames,
           authorUserIds: input.env.slackAuthorUserIds,
+          lookbackHours: SOURCE_SYNC_LOOKBACK_HOURS,
         }).sync(),
     },
     {
@@ -29,6 +32,7 @@ function buildSyncSources(input: {
         createSlackLinksSource(input.db, {
           authorNames: input.env.slackAuthorNames,
           authorUserIds: input.env.slackAuthorUserIds,
+          lookbackHours: SOURCE_SYNC_LOOKBACK_HOURS,
         }).sync(),
     },
     {
@@ -36,6 +40,7 @@ function buildSyncSources(input: {
       sync: () =>
         createInniesSource(input.db, {
           buyerKeyName: input.env.inniesBuyerKeyName,
+          lookbackHours: SOURCE_SYNC_LOOKBACK_HOURS,
         }).sync(),
     },
     {

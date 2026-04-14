@@ -734,4 +734,142 @@ describe('createInniesSource', () => {
       },
     ]);
   });
+
+  it('limits imported sessions to the configured rolling lookback window', async () => {
+    const now = Date.now();
+    const oldStartedAt = new Date(now - 30 * 60 * 60 * 1000);
+    const oldEndedAt = new Date(now - 29 * 60 * 60 * 1000);
+    const oldLastActivityAt = new Date(now - 29 * 60 * 60 * 1000);
+    const oldEventTime = new Date(now - 29.5 * 60 * 60 * 1000);
+    const recentStartedAt = new Date(now - 2 * 60 * 60 * 1000);
+    const recentEndedAt = new Date(now - 90 * 60 * 1000);
+    const recentLastActivityAt = new Date(now - 90 * 60 * 1000);
+    const recentEventTime = new Date(now - 100 * 60 * 1000);
+
+    await database.pool.query(
+      `
+        insert into in_api_keys (id, name)
+        values ($1, $2)
+      `,
+      ['60000000-0000-4000-8000-000000000001', 'shirtless'],
+    );
+    await database.pool.query(
+      `
+        insert into in_admin_sessions (
+          session_key,
+          api_key_id,
+          session_type,
+          started_at,
+          ended_at,
+          last_activity_at,
+          request_count,
+          attempt_count
+        )
+        values
+          ($1, $2, 'cli', $3, $4, $5, 1, 1),
+          ($6, $2, 'cli', $7, $8, $9, 1, 1)
+      `,
+      [
+        'cli:session:old',
+        '60000000-0000-4000-8000-000000000001',
+        oldStartedAt,
+        oldEndedAt,
+        oldLastActivityAt,
+        'cli:session:recent',
+        recentStartedAt,
+        recentEndedAt,
+        recentLastActivityAt,
+      ],
+    );
+    await database.pool.query(
+      `
+        insert into in_admin_session_attempts (
+          session_key,
+          request_attempt_archive_id,
+          request_id,
+          attempt_no,
+          event_time,
+          sequence_no,
+          provider,
+          model,
+          status
+        )
+        values
+          ($1, $2, $3, 1, $4, 1, 'openai', 'gpt-5.4', 'completed'),
+          ($5, $6, $7, 1, $8, 1, 'openai', 'gpt-5.4', 'completed')
+      `,
+      [
+        'cli:session:old',
+        '70000000-0000-4000-8000-000000000001',
+        'old-request',
+        oldEventTime,
+        'cli:session:recent',
+        '70000000-0000-4000-8000-000000000002',
+        'recent-request',
+        recentEventTime,
+      ],
+    );
+    await database.pool.query(
+      `
+        insert into in_message_blobs (id, normalized_payload)
+        values
+          ($1, $2::jsonb),
+          ($3, $4::jsonb),
+          ($5, $6::jsonb),
+          ($7, $8::jsonb)
+      `,
+      [
+        '80000000-0000-4000-8000-000000000001',
+        message('user', 'This old session should not be imported.'),
+        '80000000-0000-4000-8000-000000000002',
+        message('assistant', 'Old response.'),
+        '80000000-0000-4000-8000-000000000003',
+        message('user', 'This recent session should be imported.'),
+        '80000000-0000-4000-8000-000000000004',
+        message('assistant', 'Recent response.'),
+      ],
+    );
+    await database.pool.query(
+      `
+        insert into in_request_attempt_messages (
+          request_attempt_archive_id,
+          side,
+          ordinal,
+          message_blob_id,
+          role,
+          content_type
+        )
+        values
+          ($1, 'request', 0, $2, 'user', 'text'),
+          ($1, 'response', 0, $3, 'assistant', 'text'),
+          ($4, 'request', 0, $5, 'user', 'text'),
+          ($4, 'response', 0, $6, 'assistant', 'text')
+      `,
+      [
+        '70000000-0000-4000-8000-000000000001',
+        '80000000-0000-4000-8000-000000000001',
+        '80000000-0000-4000-8000-000000000002',
+        '70000000-0000-4000-8000-000000000002',
+        '80000000-0000-4000-8000-000000000003',
+        '80000000-0000-4000-8000-000000000004',
+      ],
+    );
+
+    const source = createInniesSource(database.pool, {
+      buyerKeyName: 'shirtless',
+      lookbackHours: 12,
+    });
+
+    await source.sync();
+
+    const events = await database.pool.query<{ source_id: string }>(
+      `
+        select source_id
+        from sp_events
+        order by source_id
+      `,
+    );
+
+    expect(events.rows).toEqual([{ source_id: 'cli:session:recent' }]);
+  });
 });

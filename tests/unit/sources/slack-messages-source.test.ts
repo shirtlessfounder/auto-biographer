@@ -272,4 +272,70 @@ describe('createSlackMessagesSource', () => {
       },
     ]);
   });
+
+  it('limits imported slack messages to the configured rolling lookback window', async () => {
+    const now = Date.now();
+
+    await database.pool.query(
+      `
+        insert into slack_messages (
+          channel_id,
+          channel_name,
+          message_ts,
+          user_id,
+          user_name,
+          text,
+          thread_ts,
+          posted_at,
+          synced_at
+        )
+        values
+          ($1, $2, $3, $4, $5, $6, $7, $8, $9),
+          ($10, $11, $12, $13, $14, $15, $16, $17, $18)
+      `,
+      [
+        'C123',
+        'shiproom',
+        '1713067200.000100',
+        'U12345',
+        'Dylan Vu',
+        'Old message should not be imported.',
+        null,
+        new Date(now - 30 * 60 * 60 * 1000),
+        new Date(now - 30 * 60 * 60 * 1000),
+        'C123',
+        'shiproom',
+        '1713175200.000100',
+        'U12345',
+        'Dylan Vu',
+        'Recent message should be imported.',
+        null,
+        new Date(now - 2 * 60 * 60 * 1000),
+        new Date(now - 2 * 60 * 60 * 1000),
+      ],
+    );
+
+    const source = createSlackMessagesSource(database.pool, {
+      authorNames: ['Dylan Vu'],
+      authorUserIds: ['U12345'],
+      lookbackHours: 12,
+    });
+
+    await source.sync();
+
+    const events = await database.pool.query<{ source_id: string; raw_text: string | null }>(
+      `
+        select source_id, raw_text
+        from sp_events
+        order by source_id
+      `,
+    );
+
+    expect(events.rows).toEqual([
+      {
+        source_id: '2',
+        raw_text: 'Recent message should be imported.',
+      },
+    ]);
+  });
 });

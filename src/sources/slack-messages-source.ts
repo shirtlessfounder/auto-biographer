@@ -6,6 +6,7 @@ import type { NormalizedEventInput } from '../normalization/types';
 type SlackAuthorFilters = {
   authorNames: readonly string[];
   authorUserIds: readonly string[];
+  lookbackHours?: number;
 };
 
 type SlackMessageRow = Record<string, unknown> & {
@@ -15,6 +16,16 @@ type SlackMessageRow = Record<string, unknown> & {
 type SlackMessagesSource = {
   sync(): Promise<UpsertedNormalizedEvent[]>;
 };
+
+const LOAD_SLACK_MESSAGES_SQL = `
+  select *
+  from slack_messages
+  where (
+    $1::integer is null
+    or posted_at >= now() - ($1::integer * interval '1 hour')
+  )
+  order by id asc
+`;
 
 const SLACK_MESSAGE_AUTHOR_NAME_KEYS = [
   'user_name',
@@ -163,7 +174,7 @@ export function createSlackMessagesSource(
 ): SlackMessagesSource {
   return {
     async sync(): Promise<UpsertedNormalizedEvent[]> {
-      const result = await db.query<SlackMessageRow>('select * from slack_messages order by id asc');
+      const result = await db.query<SlackMessageRow>(LOAD_SLACK_MESSAGES_SQL, [filters.lookbackHours ?? null]);
       const events = result.rows
         .map((row) => normalizeSlackMessageRow(row, filters))
         .filter((event): event is NormalizedEventInput => event !== null);

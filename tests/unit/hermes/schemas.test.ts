@@ -172,6 +172,22 @@ describe('runHermes', () => {
     ).rejects.toThrowError(/json/i);
   });
 
+  it('parses the json body when Hermes appends a session footer', async () => {
+    const executor = vi.fn().mockResolvedValue({
+      stdout: `${JSON.stringify(selectorPayload)}\n\nsession_id: 20260414_171417_7508f9\n`,
+      stderr: '',
+    });
+
+    await expect(
+      runHermesSelector({
+        input: {
+          candidate_id: 1,
+        },
+        executor,
+      }),
+    ).resolves.toEqual(selectorPayload);
+  });
+
   it('parses selector and drafter result unions directly', () => {
     expect(parseHermesPayload('selector', selectorPayload)).toEqual(selectorPayload);
     expect(parseHermesPayload('selector', skipPayload)).toEqual(skipPayload);
