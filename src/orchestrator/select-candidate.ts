@@ -74,6 +74,7 @@ export type SelectCandidateInput = {
   db: Queryable;
   context: RecentContextPacket;
   triggerType: string;
+  fallbackOnSkip?: boolean | undefined;
   runSelector?: SelectorRunner | undefined;
   hermesBin?: string | undefined;
   hermesExecutor?: HermesExecutor | undefined;
@@ -159,6 +160,147 @@ function dedupeArtifacts(artifacts: readonly ContextArtifact[]): ContextArtifact
   return Array.from(deduped.values());
 }
 
+function normalizeWhitespace(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function getEventSourcePriority(event: ContextEvent): number {
+  switch (event.source) {
+    case 'github':
+      return 400;
+    case 'agent_conversation':
+      return 300;
+    case 'slack_message':
+      return 200;
+    case 'slack_link':
+      return 100;
+    default:
+      return 0;
+  }
+}
+
+function scoreFallbackEvent(event: ContextEvent): number {
+  let score = getEventSourcePriority(event);
+
+  if (event.artifacts.length > 0) {
+    score += 25;
+  }
+
+  if (getString(event.title) !== null) {
+    score += 10;
+  }
+
+  if (getString(event.summary) !== null) {
+    score += 10;
+  }
+
+  if (getString(event.rawText) !== null) {
+    score += 5;
+  }
+
+  return score;
+}
+
+function compareFallbackEvents(left: ContextEvent, right: ContextEvent): number {
+  const scoreDelta = scoreFallbackEvent(right) - scoreFallbackEvent(left);
+
+  if (scoreDelta !== 0) {
+    return scoreDelta;
+  }
+
+  const occurredAtDelta = new Date(right.occurredAt).getTime() - new Date(left.occurredAt).getTime();
+
+  if (occurredAtDelta !== 0) {
+    return occurredAtDelta;
+  }
+
+  return right.id - left.id;
+}
+
+function buildFallbackPrimaryAnchor(event: ContextEvent): string {
+  const candidates = [
+    getString(event.title),
+    getString(event.summary),
+    getString(event.rawText),
+    ...event.artifacts.map((artifact) => getString(artifact.contentText)),
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate !== null) {
+      return truncateText(normalizeWhitespace(candidate), 160);
+    }
+  }
+
+  return `${event.source} activity from ${event.occurredAt}`;
+}
+
+function buildFallbackSupportingPoints(event: ContextEvent, primaryAnchor: string, skipReason: string): string[] {
+  const supportingPoints: string[] = [];
+  const seen = new Set<string>([primaryAnchor]);
+
+  const maybeAdd = (value: string | null) => {
+    if (value === null) {
+      return;
+    }
+
+    const normalized = truncateText(normalizeWhitespace(value), 160);
+
+    if (seen.has(normalized)) {
+      return;
+    }
+
+    supportingPoints.push(normalized);
+    seen.add(normalized);
+  };
+
+  maybeAdd(event.summary);
+  maybeAdd(event.rawText);
+  maybeAdd(event.artifacts[0]?.contentText ?? null);
+  maybeAdd(`Source: ${event.source}`);
+  maybeAdd(`Selector skipped this slot: ${skipReason}`);
+
+  if (supportingPoints.length === 0) {
+    supportingPoints.push('Scheduled fallback picked the strongest recent context still available.');
+  }
+
+  return supportingPoints;
+}
+
+function buildFallbackSelectorPayload(
+  context: RecentContextPacket,
+  skipReason: string,
+): HermesSelectorPayload | null {
+  const selectedEvent = [...context.events].sort(compareFallbackEvents)[0];
+
+  if (!selectedEvent) {
+    return null;
+  }
+
+  const primaryAnchor = buildFallbackPrimaryAnchor(selectedEvent);
+
+  return {
+    decision: 'select',
+    candidate_type: selectedEvent.source === 'github' ? 'ship_update' : 'work_update',
+    angle: `Scheduled fallback: ${primaryAnchor}`,
+    why_interesting: 'Scheduled runs should still surface the strongest recent work instead of silently skipping.',
+    source_event_ids: [selectedEvent.id],
+    artifact_ids: selectedEvent.artifacts.map((artifact) => artifact.id),
+    primary_anchor: primaryAnchor,
+    supporting_points: buildFallbackSupportingPoints(selectedEvent, primaryAnchor, skipReason),
+    quote_target: null,
+    suggested_media_kind: null,
+    suggested_media_request: null,
+  };
+}
+
 type CandidateSourceLinkInput = {
   eventId: number;
   artifactId: number | null;
@@ -209,6 +351,7 @@ export async function selectCandidate({
   db,
   context,
   triggerType,
+  fallbackOnSkip = false,
   runSelector,
   hermesBin,
   hermesExecutor,
@@ -216,7 +359,11 @@ export async function selectCandidate({
 }: SelectCandidateInput): Promise<SelectCandidateOutcome> {
   const candidatesRepository = createCandidatesRepository(db);
   const selector = buildSelectorRunner({ runSelector, hermesBin, hermesExecutor });
-  const selectorResult = await selector(context);
+  const selectorDecision = await selector(context);
+  const selectorResult =
+    selectorDecision.decision === 'skip' && fallbackOnSkip
+      ? buildFallbackSelectorPayload(context, selectorDecision.reason) ?? selectorDecision
+      : selectorDecision;
 
   if (selectorResult.decision === 'skip') {
     return {

@@ -1519,17 +1519,7 @@ describe('orchestrator Task 10 flow', () => {
     ]);
   });
 
-  it('sends a plain Telegram notification when a scheduled selector skip is chosen', async () => {
-    await seedEvents(database.pool, [
-      {
-        source: 'github',
-        sourceId: 'github-selector-skip-notification',
-        occurredAt: new Date('2026-04-15T13:55:00.000Z'),
-        author: 'dylanvu',
-        summary: 'Skip this scheduled slot and notify Telegram.',
-      },
-    ]);
-
+  it('sends a plain Telegram notification when a scheduled selector skip has no usable context', async () => {
     const telegram = createStubTelegramClient({ chatId: -1001234567890 });
     const runSelector = vi.fn(async () => ({
       decision: 'skip' as const,
@@ -1571,6 +1561,76 @@ describe('orchestrator Task 10 flow', () => {
     ].join('\n'));
     expect(candidate?.telegramMessageId).toBeNull();
     expect(candidate?.status).toBe('selector_skipped');
+  });
+
+  it('falls back from a scheduled selector skip when recent context exists', async () => {
+    await seedEvents(database.pool, [
+      {
+        source: 'github',
+        sourceId: 'github-selector-skip-fallback',
+        occurredAt: new Date('2026-04-15T13:55:00.000Z'),
+        author: 'shirtlessfounder',
+        title: 'auto-biographer push',
+        summary: 'Shipped the scheduled fallback path',
+        artifacts: [
+          {
+            artifactType: 'commit',
+            artifactKey: 'abc123',
+            contentText: 'feat: force scheduled fallback output',
+          },
+        ],
+      },
+    ]);
+
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const runSelector = vi.fn(async () => ({
+      decision: 'skip' as const,
+      reason: 'Nothing distinct enough to publish yet',
+    }));
+    const runDrafter = vi.fn(async () => ({
+      decision: 'success' as const,
+      delivery_kind: 'single_post' as const,
+      draft_text: 'Scheduled fallback draft ready for review.',
+      candidate_type: 'work_update',
+      quote_target_url: null,
+      why_chosen: 'Scheduled runs should still surface the strongest recent work.',
+      receipts: ['selector skipped', 'fallback selected recent context', 'drafter ok'],
+      media_request: null,
+      allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
+    }));
+    const windowsJson = [
+      {
+        name: 'weekday-morning',
+        days: ['wed'],
+        start: '10:00',
+        end: '11:00',
+      },
+    ];
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:30:00'),
+      randomFractionForSlot: () => 0.5,
+      runSelector,
+      runDrafter,
+    });
+
+    const candidate = await getCandidateById(database.pool, '1');
+
+    expect(runSelector).toHaveBeenCalledOnce();
+    expect(runDrafter).toHaveBeenCalledOnce();
+    expect(telegram.sentMessages).toHaveLength(1);
+    expect(telegram.sentPackages).toHaveLength(1);
+    expect(telegram.sentPackages[0]).toMatchObject({
+      candidateId: '1',
+      draftText: 'Scheduled fallback draft ready for review.',
+    });
+    expect(telegram.sentMessages[0]?.text).toContain('Scheduled fallback draft ready for review.');
+    expect(candidate?.status).toBe('pending_approval');
+    expect(candidate?.candidateType).toBe('ship_update');
   });
 
   it('retries a scheduled slot once after a drafter exception before finalizing it', async () => {
