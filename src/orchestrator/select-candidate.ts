@@ -1,7 +1,8 @@
 import { createCandidatesRepository, type CandidateRecord } from '../db/repositories/candidates-repository';
 import type { Queryable } from '../db/pool';
-import { enrichQuoteTarget, type EnrichedQuoteTarget } from '../enrichment/x/enrich-quote-target';
+import type { EnrichedQuoteTarget } from '../enrichment/x/enrich-quote-target';
 import type { XThreadLookupClient } from '../enrichment/x/client';
+import { findRelevantGitHubRepoUrl } from '../github/repo-link';
 import {
   runHermesSelector,
   type HermesExecutor,
@@ -51,6 +52,7 @@ export type SelectedCandidatePacket = {
   events: ContextEvent[];
   artifacts: ContextArtifact[];
   quoteTargetEnrichment: EnrichedQuoteTarget | null;
+  repoLinkUrl: string | null;
 };
 
 export type SelectorSkipOutcome = {
@@ -84,6 +86,8 @@ type RawSlackLinkPayload = Record<string, unknown> & {
   finalUrl?: unknown;
   sourceUrl?: unknown;
 };
+
+const QUOTE_TWEETS_ENABLED = false;
 
 function getString(value: unknown): string | null {
   if (typeof value !== 'string') {
@@ -183,55 +187,6 @@ function buildCandidateSourceLinks(
   return Array.from(links.values());
 }
 
-function getRawSlackLinkPayload(value: unknown): RawSlackLinkPayload | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return null;
-  }
-
-  return value as RawSlackLinkPayload;
-}
-
-async function enrichSelectedQuoteTarget(
-  events: readonly ContextEvent[],
-  xLookupClient: XThreadLookupClient | undefined,
-): Promise<EnrichedQuoteTarget | null> {
-  if (!xLookupClient) {
-    return null;
-  }
-
-  for (const event of events) {
-    if (event.source !== 'slack_link') {
-      continue;
-    }
-
-    const payload = getRawSlackLinkPayload(event.rawPayload);
-    const candidate = {
-      canonicalUrl: getString(payload?.canonicalUrl),
-      domain: getString(payload?.domain) ?? '',
-      finalUrl: getString(payload?.finalUrl),
-      id: event.sourceId,
-      url:
-        getString(payload?.sourceUrl)
-        ?? getString(payload?.finalUrl)
-        ?? getString(payload?.canonicalUrl)
-        ?? event.urlOrLocator
-        ?? '',
-    };
-
-    if (candidate.domain.length === 0 || candidate.url.length === 0) {
-      continue;
-    }
-
-    const enriched = await enrichQuoteTarget(candidate, xLookupClient);
-
-    if (enriched) {
-      return enriched;
-    }
-  }
-
-  return null;
-}
-
 async function persistCandidateSourceLinks(
   db: Queryable,
   candidateId: string,
@@ -279,8 +234,9 @@ export async function selectCandidate({
 
   const selectedEvents = findSelectedEvents(context, selectorResult.source_event_ids);
   const selectedArtifacts = findSelectedArtifacts(selectedEvents, selectorResult.artifact_ids);
-  const quoteTargetEnrichment = await enrichSelectedQuoteTarget(selectedEvents, xLookupClient);
-  const resolvedQuoteTargetUrl = selectorResult.quote_target ?? quoteTargetEnrichment?.canonicalUrl ?? null;
+  const quoteTargetEnrichment: EnrichedQuoteTarget | null = null;
+  const resolvedQuoteTargetUrl = null;
+  const repoLinkUrl = findRelevantGitHubRepoUrl(selectedEvents);
   const candidate = await candidatesRepository.createCandidate({
     triggerType,
     candidateType: selectorResult.candidate_type,
@@ -331,6 +287,7 @@ export async function selectCandidate({
       events: selectedEvents,
       artifacts: selectedArtifacts,
       quoteTargetEnrichment,
+      repoLinkUrl,
     },
   };
 }

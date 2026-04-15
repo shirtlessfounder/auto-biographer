@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the auto-biographer tick once
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/auto-biographer
+Environment=HOME=/home/ubuntu
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/bin/bash -lc 'set -euo pipefail; cd /home/ubuntu/auto-biographer; set -a; . ./.env; set +a; pnpm tick'
+StandardOutput=journal
+StandardError=journal
+

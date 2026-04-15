@@ -74,7 +74,7 @@ async function getPostgresBinDirectory(): Promise<string> {
 }
 
 async function createTestDatabase(): Promise<TestDatabase> {
-  const baseDirectory = await mkdtemp(path.join(tmpdir(), 'social-posting-repositories-'));
+  const baseDirectory = await mkdtemp(path.join(tmpdir(), 'auto-biographer-repositories-'));
   const dataDirectory = path.join(baseDirectory, 'data');
   const logFilePath = path.join(baseDirectory, 'postgres.log');
   const port = await allocatePort();
@@ -149,7 +149,7 @@ describe('database repositories', () => {
       sourceId: 'evt-1',
       occurredAt: new Date('2026-04-05T12:00:00.000Z'),
       author: 'dylanvu',
-      urlOrLocator: 'https://github.com/dylanvu/social-posting/commit/abc123',
+      urlOrLocator: 'https://github.com/dylanvu/auto-biographer/commit/abc123',
       title: 'Initial title',
       summary: 'Initial summary',
       rawText: 'Initial raw text',
@@ -162,7 +162,7 @@ describe('database repositories', () => {
       sourceId: 'evt-1',
       occurredAt: new Date('2026-04-05T12:05:00.000Z'),
       author: 'dylanvu',
-      urlOrLocator: 'https://github.com/dylanvu/social-posting/commit/def456',
+      urlOrLocator: 'https://github.com/dylanvu/auto-biographer/commit/def456',
       title: 'Updated title',
       summary: 'Updated summary',
       rawText: 'Updated raw text',

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the auto-biographer tick every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+AccuracySec=30s
+Persistent=true
+Unit=auto-biographer-tick.service
+
+[Install]
+WantedBy=timers.target

@@ -10,6 +10,7 @@ import { publishCandidate } from '../publisher/publish-candidate';
 import type { publishToXViaScript } from '../publisher/x-command';
 import { createTelegramUpdatePoller } from '../telegram/poll-updates';
 import type { TelegramClient } from '../telegram/client';
+import { formatSkipNotificationMessage } from '../telegram/command-parser';
 import { buildRecentContextPacket } from './context-builder';
 import { draftSelectedCandidate, type DrafterRunner } from './draft-candidate';
 import {
@@ -117,6 +118,30 @@ function formatError(error: unknown): string {
   }
 
   return String(error);
+}
+
+async function sendSkipNotification(input: {
+  telegramClient: TelegramClient;
+  stage: 'selector' | 'drafter';
+  triggerType: 'scheduled' | 'on_demand';
+  candidateId: string;
+  candidateType?: string | null | undefined;
+  reason?: string | null | undefined;
+}): Promise<void> {
+  try {
+    await input.telegramClient.sendMessage({
+      text: formatSkipNotificationMessage({
+        stage: input.stage,
+        triggerType: input.triggerType,
+        candidateId: input.candidateId,
+        candidateType: input.candidateType,
+        reason: input.reason,
+      }),
+      disableWebPagePreview: true,
+    });
+  } catch {
+    // Skip notifications are informational only.
+  }
 }
 
 function getWindowSlotStatus(stateJson: unknown): WindowSlotLifecycleStatus | null {
@@ -367,6 +392,15 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
       await candidatesRepository.updateCandidate(selected.candidate.id, { degraded: true });
     }
 
+    await sendSkipNotification({
+      telegramClient: input.telegramClient,
+      stage: 'selector',
+      triggerType: input.triggerType,
+      candidateId: selected.candidate.id,
+      candidateType: selected.candidate.candidateType,
+      reason: selected.candidate.errorDetails,
+    });
+
     return {
       outcome: 'selector_skipped',
       candidateId: selected.candidate.id,
@@ -410,6 +444,15 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
       await candidatesRepository.updateCandidate(drafted.candidate.id, { degraded: true });
     }
 
+    await sendSkipNotification({
+      telegramClient: input.telegramClient,
+      stage: 'drafter',
+      triggerType: input.triggerType,
+      candidateId: drafted.candidate.id,
+      candidateType: drafted.candidate.candidateType,
+      reason: drafted.candidate.errorDetails,
+    });
+
     return {
       outcome: 'drafter_skipped',
       candidateId: drafted.candidate.id,
@@ -421,8 +464,10 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
     const sentMessage = await input.telegramClient.sendCandidatePackage({
       candidateId: drafted.package.candidateId,
       candidateType: drafted.package.candidateType,
+      deliveryKind: drafted.package.deliveryKind,
       deadlineAt: drafted.package.deadlineAt,
       draftText: drafted.package.draftText,
+      threadReplyText: drafted.package.threadReplyText,
       mediaRequest: drafted.package.mediaRequest,
       quoteTargetUrl: drafted.package.quoteTargetUrl,
     });

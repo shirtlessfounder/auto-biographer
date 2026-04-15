@@ -71,7 +71,7 @@ async function getPostgresBinDirectory(): Promise<string> {
 }
 
 async function createTestDatabase(): Promise<TestDatabase> {
-  const baseDirectory = await mkdtemp(path.join(tmpdir(), 'social-posting-migrate-'));
+  const baseDirectory = await mkdtemp(path.join(tmpdir(), 'auto-biographer-migrate-'));
   const dataDirectory = path.join(baseDirectory, 'data');
   const logFilePath = path.join(baseDirectory, 'postgres.log');
   const port = await allocatePort();
@@ -123,7 +123,7 @@ async function resetSchema(pool: Pool): Promise<void> {
 }
 
 async function createFixtureMigrationsDirectory(): Promise<string> {
-  const migrationsDirectory = await mkdtemp(path.join(tmpdir(), 'social-posting-migrations-'));
+  const migrationsDirectory = await mkdtemp(path.join(tmpdir(), 'auto-biographer-migrations-'));
 
   await writeFile(
     path.join(migrationsDirectory, '0001_create_test_table.sql'),
@@ -186,7 +186,7 @@ describe('runMigrations', () => {
     }
   });
 
-  it('creates the initial social posting tables', async () => {
+  it('creates the initial auto-biographer tables', async () => {
     await runMigrations(database.pool);
 
     const result = await database.pool.query<{ table_name: string }>(`

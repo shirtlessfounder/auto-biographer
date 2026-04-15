@@ -1,8 +1,10 @@
 import type { Queryable } from '../db/pool';
 import type { NormalizedEventSource } from '../normalization/types';
 
-const DEFAULT_LOOKBACK_HOURS = 12;
+const DEFAULT_LOOKBACK_HOURS = 16;
 const DEFAULT_RECENT_PUBLISHED_POSTS_LIMIT = 5;
+const DEFAULT_PENDING_APPROVAL_CANDIDATES_LIMIT = 5;
+const ACTIVE_PENDING_APPROVAL_STATUSES = ['pending_approval', 'reminded', 'held'] as const;
 
 const CONTEXT_SOURCES: readonly NormalizedEventSource[] = [
   'slack_message',
@@ -46,6 +48,16 @@ type PublishedPostRow = {
   media_attached: boolean;
 };
 
+type PendingApprovalCandidateRow = {
+  id: string;
+  status: string;
+  candidate_type: string;
+  created_at: Date;
+  final_post_text: string | null;
+  quote_target_url: string | null;
+  media_request: string | null;
+};
+
 export type ContextArtifact = {
   id: number;
   eventId: number;
@@ -82,6 +94,16 @@ export type RecentPublishedPostSummary = {
   mediaAttached: boolean;
 };
 
+export type PendingApprovalCandidateSummary = {
+  id: number;
+  status: string;
+  candidateType: string;
+  createdAt: string;
+  finalPostText: string | null;
+  quoteTargetUrl: string | null;
+  mediaRequest: string | null;
+};
+
 export type RecentContextPacket = {
   kind: 'recent_context';
   generatedAt: string;
@@ -89,6 +111,7 @@ export type RecentContextPacket = {
   windowEnd: string;
   events: ContextEvent[];
   recentPublishedPosts: RecentPublishedPostSummary[];
+  pendingApprovalCandidates: PendingApprovalCandidateSummary[];
 };
 
 export type BuildRecentContextPacketInput = {
@@ -96,6 +119,7 @@ export type BuildRecentContextPacketInput = {
   now?: (() => Date) | undefined;
   lookbackHours?: number | undefined;
   recentPublishedPostsLimit?: number | undefined;
+  pendingApprovalCandidatesLimit?: number | undefined;
 };
 
 function parseDbId(value: string): number {
@@ -136,11 +160,24 @@ function mapPublishedPostRow(row: PublishedPostRow): RecentPublishedPostSummary 
   };
 }
 
+function mapPendingApprovalCandidateRow(row: PendingApprovalCandidateRow): PendingApprovalCandidateSummary {
+  return {
+    id: parseDbId(row.id),
+    status: row.status,
+    candidateType: row.candidate_type,
+    createdAt: row.created_at.toISOString(),
+    finalPostText: row.final_post_text,
+    quoteTargetUrl: row.quote_target_url,
+    mediaRequest: row.media_request,
+  };
+}
+
 export async function buildRecentContextPacket({
   db,
   now = () => new Date(),
   lookbackHours = DEFAULT_LOOKBACK_HOURS,
   recentPublishedPostsLimit = DEFAULT_RECENT_PUBLISHED_POSTS_LIMIT,
+  pendingApprovalCandidatesLimit = DEFAULT_PENDING_APPROVAL_CANDIDATES_LIMIT,
 }: BuildRecentContextPacketInput): Promise<RecentContextPacket> {
   const windowEnd = now();
   const windowStart = subtractHours(windowEnd, lookbackHours);
@@ -223,6 +260,23 @@ export async function buildRecentContextPacket({
     `,
     [recentPublishedPostsLimit],
   );
+  const pendingApprovalCandidatesResult = await db.query<PendingApprovalCandidateRow>(
+    `
+      select
+        id,
+        status,
+        candidate_type,
+        created_at,
+        final_post_text,
+        quote_target_url,
+        media_request
+      from sp_post_candidates
+      where status = any($1::text[])
+      order by created_at desc, id desc
+      limit $2
+    `,
+    [ACTIVE_PENDING_APPROVAL_STATUSES, pendingApprovalCandidatesLimit],
+  );
 
   return {
     kind: 'recent_context',
@@ -249,5 +303,6 @@ export async function buildRecentContextPacket({
       };
     }),
     recentPublishedPosts: recentPublishedPostsResult.rows.map(mapPublishedPostRow),
+    pendingApprovalCandidates: pendingApprovalCandidatesResult.rows.map(mapPendingApprovalCandidateRow),
   };
 }

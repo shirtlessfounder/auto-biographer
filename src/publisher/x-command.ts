@@ -64,6 +64,7 @@ export async function publishToXViaScript(input: {
   postProfile: string;
   text: string;
   quoteTargetUrl?: string | null | undefined;
+  replyToTweetId?: string | null | undefined;
   mediaPaths?: readonly string[] | undefined;
   execFile?: ExecFileLike | undefined;
 }): Promise<{ tweetId: string; url: string; raw: unknown }> {
@@ -73,6 +74,14 @@ export async function publishToXViaScript(input: {
     input.postProfile,
     '--json',
   ];
+
+  if (input.replyToTweetId && input.quoteTargetUrl) {
+    throw new Error('Cannot publish a reply and a quote tweet in the same command');
+  }
+
+  if (input.replyToTweetId) {
+    args.push('--reply-to', input.replyToTweetId);
+  }
 
   if (input.quoteTargetUrl) {
     const parsedQuoteTarget = parseXPostUrl(input.quoteTargetUrl);

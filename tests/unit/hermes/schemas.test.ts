@@ -16,7 +16,7 @@ const selectorPayload = {
   artifact_ids: [7001],
   primary_anchor: 'Hermes now returns strict JSON for the posting flow.',
   supporting_points: ['The output is machine-validated.', 'The CLI runs in one shot.'],
-  quote_target: 'https://x.com/openai/status/1234567890',
+  quote_target: null,
   suggested_media_kind: 'image',
   suggested_media_request: 'Use the release screenshot with the JSON contract visible.',
 } as const;
@@ -85,6 +85,17 @@ describe('runHermes', () => {
       runHermesSelector({
         input: {
           recent_posts: [{ id: 55, text: 'Earlier launch post' }],
+          pendingApprovalCandidates: [
+            {
+              id: 91,
+              status: 'pending_approval',
+              candidateType: 'ship_update',
+              createdAt: '2026-04-15T11:58:00.000Z',
+              finalPostText: 'Shipping work should beat another quote tweet.',
+              quoteTargetUrl: null,
+              mediaRequest: null,
+            },
+          ],
         },
         hermesBin: '/opt/hermes',
         executor,
@@ -105,7 +116,11 @@ describe('runHermes', () => {
     expect(typeof prompt).toBe('string');
     expect(prompt).toContain('semiautonomous X posting service');
     expect(prompt).toContain('Return raw JSON only');
-    expect(prompt).toContain('"recent_posts"');
+    expect(prompt).toContain('"pendingApprovalCandidates"');
+    expect(prompt).toContain('Do not choose quote tweets for now');
+    expect(prompt).toContain('repo_created');
+    expect(prompt).toContain('top-tier');
+    expect(prompt).toContain('quote_target');
   });
 
   it('accepts selector skip results without a caller-provided output kind', async () => {
@@ -150,10 +165,21 @@ describe('runHermes', () => {
       runHermesDrafter({
         input: {
           candidate_id: 99,
+          repoLinkUrl: 'https://github.com/dylanvu/auto-biographer',
+          selection: {
+            suggestedMediaRequest: 'terminal screenshot of the shipped workflow',
+          },
         },
         executor,
       }),
     ).resolves.toEqual(drafterPayload);
+
+    const prompt = executor.mock.calls[0]?.[1]?.[2];
+    expect(typeof prompt).toBe('string');
+    expect(prompt).toContain('280');
+    expect(prompt).toContain('repoLinkUrl');
+    expect(prompt).toContain('2-post thread');
+    expect(prompt).toContain('media_request');
   });
 
   it('rejects invalid json on stdout', async () => {

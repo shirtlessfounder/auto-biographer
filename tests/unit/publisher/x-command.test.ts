@@ -66,6 +66,34 @@ describe('publishToXViaScript', () => {
     );
   });
 
+  it('builds a reply command when publishing the second post of a thread', async () => {
+    const execFile = vi.fn(async () => ({
+      stdout: `${JSON.stringify({ ok: true, tweetId: '1902', url: 'https://x.com/me/status/1902' })}\n`,
+      stderr: '',
+    }));
+
+    await publishToXViaScript({
+      clawdTweetScript: '/srv/clawd/scripts/tweet.js',
+      postProfile: 'bicep_pump',
+      text: 'https://github.com/dylanvu/auto-biographer',
+      replyToTweetId: '1901',
+      execFile,
+    });
+
+    expect(execFile).toHaveBeenCalledWith(
+      'node',
+      [
+        '/srv/clawd/scripts/tweet.js',
+        '--profile',
+        'bicep_pump',
+        '--json',
+        '--reply-to',
+        '1901',
+        'https://github.com/dylanvu/auto-biographer',
+      ],
+    );
+  });
+
   it('throws on json failure payloads from the script', async () => {
     const execFile = vi.fn(async () => ({
       stdout: `${JSON.stringify({ ok: false, error: 'rate limited', code: 429 })}\n`,

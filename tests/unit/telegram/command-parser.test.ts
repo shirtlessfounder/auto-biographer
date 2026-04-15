@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import * as commandParser from '../../../src/telegram/command-parser';
 
-import { parseTelegramControlUpdate } from '../../../src/telegram/command-parser';
+import {
+  formatCandidatePackageMessage,
+  parseTelegramControlUpdate,
+} from '../../../src/telegram/command-parser';
 
 function buildReplyUpdate(input: {
   updateId?: number;
@@ -32,8 +36,63 @@ function buildReplyUpdate(input: {
 }
 
 describe('parseTelegramControlUpdate', () => {
+  it('formats skip notifications as plain informational messages', () => {
+    const formatter = (commandParser as Record<string, unknown>).formatSkipNotificationMessage;
+
+    expect(typeof formatter).toBe('function');
+
+    if (typeof formatter !== 'function') {
+      return;
+    }
+
+    expect(
+      formatter({
+        stage: 'drafter',
+        triggerType: 'on_demand',
+        candidateId: '456',
+        candidateType: 'ship_update',
+        reason: 'Not concrete enough yet',
+      }),
+    ).toBe([
+      'Skipped: drafter',
+      'Trigger: on_demand',
+      'Type: ship_update',
+      'Reason: Not concrete enough yet',
+      'Ref: 456',
+    ].join('\n'));
+  });
+
+  it('formats candidate packages without a visible candidate header and still leaves a parseable ref', () => {
+    const message = formatCandidatePackageMessage({
+      candidateId: '123',
+      candidateType: 'ship_update',
+      deadlineAt: new Date('2026-04-15T14:16:03.000Z'),
+      draftText: 'Ship the orchestrator update in the lead tweet.',
+      mediaRequest: 'annotated screenshot of the shipping flow',
+    });
+
+    expect(message.startsWith('Candidate #123')).toBe(false);
+    expect(message).toContain('Type: ship_update');
+    expect(message).toContain('Media request: annotated screenshot of the shipping flow');
+    expect(message).toContain('Ref: 123');
+  });
+
+  it('formats thread packages with a repo-link reply preview', () => {
+    const message = formatCandidatePackageMessage({
+      candidateId: '456',
+      candidateType: 'ship_update',
+      draftText: 'Lead tweet for a shipped project.',
+      deliveryKind: 'thread',
+      threadReplyText: 'https://github.com/dylanvu/auto-biographer',
+    });
+
+    expect(message).toContain('Delivery: thread');
+    expect(message).toContain('Reply:');
+    expect(message).toContain('https://github.com/dylanvu/auto-biographer');
+  });
+
   it('parses the supported reply commands for a candidate package', () => {
-    const replyText = 'Candidate #123\nDraft:\nship it';
+    const replyText = 'Type: ship_update\nDraft:\nship it\n\nRef: 123\nReply with: skip | hold | post now | edit: ... | another angle';
 
     expect(parseTelegramControlUpdate(buildReplyUpdate({ text: 'skip', replyText }))).toEqual({
       updateId: '9001',
@@ -81,7 +140,7 @@ describe('parseTelegramControlUpdate', () => {
     const parsed = parseTelegramControlUpdate(
       buildReplyUpdate({
         text: '  edit:  rewrite with sharper framing  ',
-        replyText: 'Candidate #456\nDraft:\nold version',
+        replyText: 'Type: ship_update\nDraft:\nold version\n\nRef: 456\nReply with: skip | hold | post now | edit: ... | another angle',
       }),
     );
 
@@ -101,7 +160,7 @@ describe('parseTelegramControlUpdate', () => {
       parseTelegramControlUpdate(
         buildReplyUpdate({
           text: 'skip please',
-          replyText: 'Candidate #123\nDraft:\nship it',
+          replyText: 'Type: ship_update\nDraft:\nship it\n\nRef: 123\nReply with: skip | hold | post now | edit: ... | another angle',
         }),
       ),
     ).toBeNull();
@@ -110,7 +169,7 @@ describe('parseTelegramControlUpdate', () => {
       parseTelegramControlUpdate(
         buildReplyUpdate({
           text: 'edit:',
-          replyText: 'Candidate #123\nDraft:\nship it',
+          replyText: 'Type: ship_update\nDraft:\nship it\n\nRef: 123\nReply with: skip | hold | post now | edit: ... | another angle',
         }),
       ),
     ).toBeNull();
@@ -119,13 +178,25 @@ describe('parseTelegramControlUpdate', () => {
       parseTelegramControlUpdate(
         buildReplyUpdate({
           text: 'SKIP',
-          replyText: 'Candidate #123\nDraft:\nship it',
+          replyText: 'Type: ship_update\nDraft:\nship it\n\nRef: 123\nReply with: skip | hold | post now | edit: ... | another angle',
         }),
       ),
     ).toBeNull();
   });
 
   it('rejects updates that are not user replies to a candidate package', () => {
+    expect(
+      parseTelegramControlUpdate(
+        buildReplyUpdate({
+          text: 'skip',
+          replyText: 'Type: ship_update\nDraft:\nship it\n\nRef: 123\nReply with: skip | hold | post now | edit: ... | another angle',
+        }),
+      ),
+    ).toMatchObject({
+      candidateId: '123',
+      action: 'skip',
+    });
+
     expect(
       parseTelegramControlUpdate(
         buildReplyUpdate({

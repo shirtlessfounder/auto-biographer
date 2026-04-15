@@ -28,4 +28,9 @@ Rules:
 - Use only ids present in the input packet.
 - Keep strings concise and factual.
 - `artifact_ids` may be an empty array when no artifact is needed.
-- `quote_target`, `suggested_media_kind`, and `suggested_media_request` must be `null` when unused.
+- Do not choose quote tweets for now.
+- `quote_target` must always be `null` until quote tweets are re-enabled.
+- Prefer original observations, shipped work, project updates, and fresh agent output over commentary about someone else's post.
+- Treat `action:repo_created` as a top-tier project-start signal. Prefer it over routine pushes or branch-created noise when freshness and specificity are comparable.
+- `suggested_media_kind` and `suggested_media_request` must be `null` when unused.
+- Avoid choosing a candidate that is too similar in angle, text, or quote target to `recentPublishedPosts` or `pendingApprovalCandidates`.

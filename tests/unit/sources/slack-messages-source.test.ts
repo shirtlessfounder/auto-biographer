@@ -70,7 +70,7 @@ async function getPostgresBinDirectory(): Promise<string> {
 }
 
 async function createTestDatabase(): Promise<TestDatabase> {
-  const baseDirectory = await mkdtemp(path.join(tmpdir(), 'social-posting-slack-messages-'));
+  const baseDirectory = await mkdtemp(path.join(tmpdir(), 'auto-biographer-slack-messages-'));
   const dataDirectory = path.join(baseDirectory, 'data');
   const logFilePath = path.join(baseDirectory, 'postgres.log');
   const port = await allocatePort();
@@ -180,7 +180,7 @@ describe('createSlackMessagesSource', () => {
         '1713175200.000100',
         'U00000',
         'Dylan Vu',
-        'Shipped the social-posting foundation.',
+        'Shipped the auto-biographer foundation.',
         null,
         new Date('2026-04-15T10:00:00.000Z'),
         new Date('2026-04-15T10:05:00.000Z'),
@@ -252,7 +252,7 @@ describe('createSlackMessagesSource', () => {
         url_or_locator: null,
         title: null,
         summary: null,
-        raw_text: 'Shipped the social-posting foundation.',
+        raw_text: 'Shipped the auto-biographer foundation.',
         tags: ['shiproom'],
         artifact_refs: [],
         raw_payload: null,

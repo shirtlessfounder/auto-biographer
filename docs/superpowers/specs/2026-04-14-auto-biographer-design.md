@@ -1,8 +1,8 @@
-# X Publisher V1 Design
+# Auto-biographer Publisher Design
 
 ## Goal
 
-Add the missing publisher stage to the social-posting system so a candidate that reaches `post_requested` is published to X immediately, using the existing Telegram approval flow and the existing `clawd/scripts/tweet.js` runtime on EC2.
+Add the missing publisher stage to the auto-biographer system so a candidate that reaches `post_requested` is published to X immediately, using the existing Telegram approval flow and the existing `clawd/scripts/tweet.js` runtime on EC2.
 
 This design is intentionally narrow:
 

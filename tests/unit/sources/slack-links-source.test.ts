@@ -70,7 +70,7 @@ async function getPostgresBinDirectory(): Promise<string> {
 }
 
 async function createTestDatabase(): Promise<TestDatabase> {
-  const baseDirectory = await mkdtemp(path.join(tmpdir(), 'social-posting-slack-links-'));
+  const baseDirectory = await mkdtemp(path.join(tmpdir(), 'auto-biographer-slack-links-'));
   const dataDirectory = path.join(baseDirectory, 'data');
   const logFilePath = path.join(baseDirectory, 'postgres.log');
   const port = await allocatePort();

@@ -1,5 +1,7 @@
 import { createCandidatesRepository } from '../db/repositories/candidates-repository';
 import type { Queryable } from '../db/pool';
+import { findRelevantGitHubRepoUrl, resolvePublicGitHubRepoUrl } from '../github/repo-link';
+import type { HermesDrafterPayload } from '../hermes/schemas';
 import type { TelegramClient } from '../telegram/client';
 import { publishToXViaScript } from './x-command';
 import { materializeTelegramPhotoBatch } from './telegram-media';
@@ -8,6 +10,66 @@ type PersistedPublishRow = {
   published_post_id: string;
   x_post_id: string | null;
 };
+
+type CandidatePublishRow = {
+  id: string;
+  status: string;
+  final_post_text: string | null;
+  quote_target_url: string | null;
+  media_batch_json: unknown;
+  drafter_output_json: unknown;
+};
+
+type CandidateRepoSourceRow = {
+  source: string;
+  url_or_locator: string | null;
+  tags: unknown;
+  raw_payload: unknown;
+};
+
+function parseStoredDrafterPayload(value: unknown): HermesDrafterPayload | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+
+  if (
+    record.decision !== 'success'
+    || record.delivery_kind !== 'single_post'
+    || typeof record.draft_text !== 'string'
+  ) {
+    return null;
+  }
+
+  return record as HermesDrafterPayload;
+}
+
+async function loadCandidateRepoLinkUrl(db: Queryable, candidateId: string): Promise<string | null> {
+  const result = await db.query<CandidateRepoSourceRow>(
+    `
+      select
+        events.source,
+        events.url_or_locator,
+        events.tags,
+        events.raw_payload
+      from sp_candidate_sources candidate_sources
+      join sp_events events on events.id = candidate_sources.event_id
+      where candidate_sources.candidate_id = $1
+      order by events.id asc
+    `,
+    [candidateId],
+  );
+
+  return findRelevantGitHubRepoUrl(
+    result.rows.map((row) => ({
+      source: row.source,
+      urlOrLocator: row.url_or_locator,
+      tags: row.tags,
+      rawPayload: row.raw_payload,
+    })),
+  );
+}
 
 export async function publishCandidate(input: {
   db: Queryable;
@@ -18,18 +80,13 @@ export async function publishCandidate(input: {
   now?: (() => Date) | undefined;
   publishToX?: typeof publishToXViaScript | undefined;
   materializeMediaBatch?: typeof materializeTelegramPhotoBatch | undefined;
+  resolvePublicRepoLinkUrl?: typeof resolvePublicGitHubRepoUrl | undefined;
 }): Promise<{ outcome: 'published' | 'ignored'; xPostId: string | null }> {
   const now = input.now ?? (() => new Date());
   const candidatesRepository = createCandidatesRepository(input.db);
-  const loadedCandidate = await input.db.query<{
-    id: string;
-    status: string;
-    final_post_text: string | null;
-    quote_target_url: string | null;
-    media_batch_json: unknown;
-  }>(
+  const loadedCandidate = await input.db.query<CandidatePublishRow>(
     `
-      select id, status, final_post_text, quote_target_url, media_batch_json
+      select id, status, final_post_text, quote_target_url, media_batch_json, drafter_output_json
       from sp_post_candidates
       where id = $1
     `,
@@ -47,8 +104,10 @@ export async function publishCandidate(input: {
   const finalPostText = candidateRow.final_post_text;
   const quoteTargetUrl = candidateRow.quote_target_url;
   const mediaBatchJson = candidateRow.media_batch_json;
+  const drafterPayload = parseStoredDrafterPayload(candidateRow.drafter_output_json);
   const publishToX = input.publishToX ?? publishToXViaScript;
   const materializeMediaBatch = input.materializeMediaBatch ?? materializeTelegramPhotoBatch;
+  const resolvePublicRepoLinkUrl = input.resolvePublicRepoLinkUrl ?? resolvePublicGitHubRepoUrl;
 
   let cleanup = async () => {};
 
@@ -57,6 +116,12 @@ export async function publishCandidate(input: {
       throw new Error('Candidate final post text is required');
     }
 
+    const repoLinkUrl =
+      quoteTargetUrl === null && drafterPayload?.delivery_kind === 'single_post'
+        ? await resolvePublicRepoLinkUrl({
+          repoUrl: await loadCandidateRepoLinkUrl(input.db, input.candidateId),
+        })
+        : null;
     let mediaPaths: string[] = [];
 
     if (mediaBatchJson) {
@@ -76,6 +141,14 @@ export async function publishCandidate(input: {
       quoteTargetUrl,
       mediaPaths,
     });
+    const replyPublished = repoLinkUrl
+      ? await publishToX({
+        clawdTweetScript: input.clawdTweetScript,
+        postProfile: input.postProfile,
+        text: repoLinkUrl,
+        replyToTweetId: published.tweetId,
+      })
+      : null;
     const result = await input.db.query<PersistedPublishRow>(
       `
         with updated_candidate as (
@@ -121,15 +194,15 @@ export async function publishCandidate(input: {
         select id as published_post_id, x_post_id
         from inserted_post
       `,
-      [
+        [
         input.candidateId,
         now(),
         published.tweetId,
-        quoteTargetUrl ? 'quote_tweet' : 'tweet',
+        quoteTargetUrl ? 'quote_tweet' : replyPublished ? 'thread' : 'tweet',
         finalPostText,
         quoteTargetUrl,
         mediaPaths.length > 0,
-        JSON.stringify(published.raw),
+        JSON.stringify(replyPublished ? { primary: published.raw, reply: replyPublished.raw } : published.raw),
       ],
     );
 

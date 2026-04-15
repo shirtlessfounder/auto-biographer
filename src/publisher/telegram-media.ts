@@ -41,7 +41,7 @@ export async function materializeTelegramPhotoBatch(input: {
     throw new Error('Telegram photo batches must contain between 1 and 4 photos');
   }
 
-  const directory = await mkdtemp(path.join(tmpdir(), 'social-posting-media-'));
+  const directory = await mkdtemp(path.join(tmpdir(), 'auto-biographer-media-'));
   const cleanup = async () => {
     await rm(directory, { force: true, recursive: true });
   };

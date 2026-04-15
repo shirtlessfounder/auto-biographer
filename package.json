@@ -1,7 +1,7 @@
 {
-  "name": "social-posting",
+  "name": "auto-biographer",
   "version": "1.0.0",
-  "description": "Semiautonomous X posting service foundation.",
+  "description": "auto-biographer foundation for the semiautonomous X posting workflow.",
   "private": true,
   "packageManager": "pnpm@10.12.1",
   "type": "module",

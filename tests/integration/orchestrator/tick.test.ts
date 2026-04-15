@@ -122,7 +122,7 @@ async function getPostgresBinDirectory(): Promise<string> {
 }
 
 async function createTestDatabase(): Promise<TestDatabase> {
-  const baseDirectory = await mkdtemp(path.join(tmpdir(), 'social-posting-orchestrator-'));
+  const baseDirectory = await mkdtemp(path.join(tmpdir(), 'auto-biographer-orchestrator-'));
   const dataDirectory = path.join(baseDirectory, 'data');
   const logFilePath = path.join(baseDirectory, 'postgres.log');
   const port = await allocatePort();
@@ -376,8 +376,9 @@ describe('orchestrator Task 10 flow', () => {
     }
   });
 
-  it('builds one recent context packet from the last 12 hours, excludes used sources, and includes recent published posts', async () => {
+  it('builds one recent context packet from the last 16 hours, excludes used sources, and includes recent published posts', async () => {
     const now = new Date('2026-04-15T12:00:00.000Z');
+    const candidatesRepository = createCandidatesRepository(database.pool);
     const seededEvents = await seedEvents(database.pool, [
       {
         source: 'slack_message',
@@ -434,7 +435,7 @@ describe('orchestrator Task 10 flow', () => {
         sourceId: 'github-fresh',
         occurredAt: new Date('2026-04-15T07:30:00.000Z'),
         author: 'dylanvu',
-        title: 'social-posting push',
+        title: 'auto-biographer push',
         summary: 'Added orchestrator support',
         artifacts: [
           {
@@ -447,7 +448,7 @@ describe('orchestrator Task 10 flow', () => {
       {
         source: 'github',
         sourceId: 'github-old',
-        occurredAt: new Date('2026-04-14T23:59:00.000Z'),
+        occurredAt: new Date('2026-04-14T19:59:00.000Z'),
         author: 'dylanvu',
         summary: 'Too old for the rolling window',
       },
@@ -460,6 +461,60 @@ describe('orchestrator Task 10 flow', () => {
     const oldGitHub = requireValue(seededEvents[5], 'oldGitHub');
 
     const publishedPost = await createPublishedPost(database.pool);
+    const activePendingCandidate = await candidatesRepository.createCandidate({
+      triggerType: 'scheduled',
+      candidateType: 'ship_update',
+      status: 'pending_approval',
+      finalPostText: 'Shipped the first bounded source sync pass.',
+      mediaRequest: 'terminal screenshot of the sync timings',
+    });
+    const activeRemindedCandidate = await candidatesRepository.createCandidate({
+      triggerType: 'scheduled',
+      candidateType: 'work_update',
+      status: 'reminded',
+      finalPostText: 'Tightened Hermes stdout parsing for one-shot runs.',
+    });
+    const activeHeldCandidate = await candidatesRepository.createCandidate({
+      triggerType: 'scheduled',
+      candidateType: 'quote_post',
+      status: 'held',
+      finalPostText: 'Held quote tweet about a public launch post.',
+      quoteTargetUrl: 'https://x.com/example/status/222',
+    });
+    await candidatesRepository.createCandidate({
+      triggerType: 'scheduled',
+      candidateType: 'ship_update',
+      status: 'skipped',
+      finalPostText: 'This stale skipped draft should stay out of selector context.',
+    });
+
+    await database.pool.query(
+      `
+        update sp_post_candidates
+        set created_at = $2,
+            updated_at = $2
+        where id = $1
+      `,
+      [activePendingCandidate.id, new Date('2026-04-15T09:10:00.000Z')],
+    );
+    await database.pool.query(
+      `
+        update sp_post_candidates
+        set created_at = $2,
+            updated_at = $2
+        where id = $1
+      `,
+      [activeRemindedCandidate.id, new Date('2026-04-15T10:20:00.000Z')],
+    );
+    await database.pool.query(
+      `
+        update sp_post_candidates
+        set created_at = $2,
+            updated_at = $2
+        where id = $1
+      `,
+      [activeHeldCandidate.id, new Date('2026-04-15T11:40:00.000Z')],
+    );
     await database.pool.query(
       `
         insert into sp_source_usage (event_id, artifact_id, published_post_id)
@@ -477,7 +532,7 @@ describe('orchestrator Task 10 flow', () => {
       now: () => now,
     });
 
-    expect(context.windowStart).toBe('2026-04-15T00:00:00.000Z');
+    expect(context.windowStart).toBe('2026-04-14T20:00:00.000Z');
     expect(context.windowEnd).toBe('2026-04-15T12:00:00.000Z');
     expect(context.events.map((event) => event.sourceId)).toEqual([
       freshSlackLink.event.sourceId,
@@ -500,6 +555,35 @@ describe('orchestrator Task 10 flow', () => {
         postedAt: '2026-04-15T11:45:00.000Z',
         quoteTargetUrl: 'https://x.com/example/status/999',
       }),
+    ]);
+    expect(context.pendingApprovalCandidates).toEqual([
+      {
+        id: Number(activeHeldCandidate.id),
+        status: 'held',
+        candidateType: 'quote_post',
+        createdAt: '2026-04-15T11:40:00.000Z',
+        finalPostText: 'Held quote tweet about a public launch post.',
+        quoteTargetUrl: 'https://x.com/example/status/222',
+        mediaRequest: null,
+      },
+      {
+        id: Number(activeRemindedCandidate.id),
+        status: 'reminded',
+        candidateType: 'work_update',
+        createdAt: '2026-04-15T10:20:00.000Z',
+        finalPostText: 'Tightened Hermes stdout parsing for one-shot runs.',
+        quoteTargetUrl: null,
+        mediaRequest: null,
+      },
+      {
+        id: Number(activePendingCandidate.id),
+        status: 'pending_approval',
+        candidateType: 'ship_update',
+        createdAt: '2026-04-15T09:10:00.000Z',
+        finalPostText: 'Shipped the first bounded source sync pass.',
+        quoteTargetUrl: null,
+        mediaRequest: 'terminal screenshot of the sync timings',
+      },
     ]);
     expect(context.events[0]?.artifacts).toEqual([
       expect.objectContaining({
@@ -663,7 +747,7 @@ describe('orchestrator Task 10 flow', () => {
     ]);
   });
 
-  it('persists selected candidate-source links without duplicates and returns one Telegram-ready package after drafting', async () => {
+  it('disables quote tweets while still persisting selected sources and returning one Telegram-ready package after drafting', async () => {
     const now = new Date('2026-04-15T12:00:00.000Z');
     const seededEvents = await seedEvents(database.pool, [
       {
@@ -693,7 +777,7 @@ describe('orchestrator Task 10 flow', () => {
         sourceId: 'github-sha',
         occurredAt: new Date('2026-04-15T10:00:00.000Z'),
         author: 'dylanvu',
-        title: 'social-posting push',
+        title: 'auto-biographer push',
         summary: 'Added the first orchestration layer',
         artifacts: [
           {
@@ -713,6 +797,9 @@ describe('orchestrator Task 10 flow', () => {
       db: database.pool,
       now: () => now,
     });
+    const xLookupClient: XThreadLookupClient = {
+      lookupThread: vi.fn(createXLookupClient().lookupThread),
+    };
     const runSelector = vi.fn(async () => ({
       decision: 'select' as const,
       candidate_type: 'ship_update',
@@ -730,7 +817,7 @@ describe('orchestrator Task 10 flow', () => {
       ],
       primary_anchor: 'The new orchestration layer exists and is tested',
       supporting_points: ['It assembles context', 'It drafts a Telegram-ready package'],
-      quote_target: null,
+      quote_target: 'https://x.com/dylanvu/status/1234567890123456789',
       suggested_media_kind: null,
       suggested_media_request: null,
     }));
@@ -739,7 +826,7 @@ describe('orchestrator Task 10 flow', () => {
       context,
       triggerType: 'scheduled',
       runSelector,
-      xLookupClient: createXLookupClient(),
+      xLookupClient,
     });
 
     expect(selected.outcome).toBe('select');
@@ -747,17 +834,16 @@ describe('orchestrator Task 10 flow', () => {
       throw new Error('Expected a selected candidate');
     }
 
-    expect(selected.selectedPacket.quoteTargetEnrichment).toMatchObject({
-      canonicalUrl: 'https://x.com/dylanvu/status/1234567890123456789',
-      tweetId: '1234567890123456789',
-    });
+    expect(selected.selectedPacket.quoteTargetEnrichment).toBeNull();
+    expect(selected.selectedPacket.selection.quoteTargetUrl).toBeNull();
+    expect(xLookupClient.lookupThread).not.toHaveBeenCalled();
 
     const runDrafter = vi.fn(async (input: typeof selected.selectedPacket) => ({
       decision: 'success' as const,
       delivery_kind: 'single_post' as const,
       draft_text: `Built the first semiautonomous X orchestrator layer. ${input.selection.primaryAnchor}`,
       candidate_type: input.selection.candidateType,
-      quote_target_url: input.quoteTargetEnrichment?.canonicalUrl ?? null,
+      quote_target_url: 'https://x.com/dylanvu/status/1234567890123456789',
       why_chosen: 'It is concrete, recent, and grounded in real work.',
       receipts: ['Context packet built', 'Selector persisted', 'Telegram package ready'],
       media_request: 'screenshot of the new integration test passing',
@@ -767,6 +853,7 @@ describe('orchestrator Task 10 flow', () => {
       db: database.pool,
       selected,
       runDrafter,
+      resolvePublicRepoLinkUrl: vi.fn(async ({ repoUrl }) => repoUrl),
     });
 
     expect(runDrafter).toHaveBeenCalledOnce();
@@ -782,7 +869,7 @@ describe('orchestrator Task 10 flow', () => {
         deliveryKind: 'single_post',
         draftText:
           'Built the first semiautonomous X orchestrator layer. The new orchestration layer exists and is tested',
-        quoteTargetUrl: 'https://x.com/dylanvu/status/1234567890123456789',
+        quoteTargetUrl: null,
         mediaRequest: 'screenshot of the new integration test passing',
         allowedCommands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
       },
@@ -846,7 +933,7 @@ describe('orchestrator Task 10 flow', () => {
         status: 'pending_approval',
         final_post_text:
           'Built the first semiautonomous X orchestrator layer. The new orchestration layer exists and is tested',
-        quote_target_url: 'https://x.com/dylanvu/status/1234567890123456789',
+        quote_target_url: null,
         media_request: 'screenshot of the new integration test passing',
         drafter_output_json: {
           decision: 'success',
@@ -894,6 +981,162 @@ describe('orchestrator Task 10 flow', () => {
       windowName: 'weekday-morning',
     });
     expect(atDue[0]?.scheduledFor.getTime()).toBe(atLocal('2026-04-15T10:30:00').getTime());
+  });
+
+  it('promotes repo-backed original drafts into thread delivery with a repo-link reply', async () => {
+    const now = new Date('2026-04-15T12:00:00.000Z');
+    const seededEvents = await seedEvents(database.pool, [
+      {
+        source: 'github',
+        sourceId: 'github-thread-draft',
+        occurredAt: new Date('2026-04-15T11:10:00.000Z'),
+        author: 'dylanvu',
+        title: 'auto-biographer push',
+        summary: 'Built the x-post scraper',
+        urlOrLocator: 'https://github.com/dylanvu/auto-biographer/commit/abc123',
+        tags: ['repo:dylanvu/auto-biographer', 'action:push'],
+        rawPayload: {
+          repo: 'dylanvu/auto-biographer',
+        },
+      },
+    ]);
+    const githubEvent = requireValue(seededEvents[0], 'githubEvent');
+
+    const context = await buildRecentContextPacket({
+      db: database.pool,
+      now: () => now,
+    });
+    const runSelector = vi.fn(async () => ({
+      decision: 'select' as const,
+      candidate_type: 'ship_update',
+      angle: 'Show the shipped project',
+      why_interesting: 'The repo-backed change is live',
+      source_event_ids: [Number(githubEvent.event.id)],
+      artifact_ids: [],
+      primary_anchor: 'Built the x-post scraper',
+      supporting_points: ['Repo-backed change', 'Fresh push'],
+      quote_target: null,
+      suggested_media_kind: 'image',
+      suggested_media_request: 'screenshot of the x-post scraper output table',
+    }));
+    const selected = await selectCandidate({
+      db: database.pool,
+      context,
+      triggerType: 'scheduled',
+      runSelector,
+    });
+
+    expect(selected.outcome).toBe('select');
+    if (selected.outcome !== 'select') {
+      throw new Error('Expected a selected candidate');
+    }
+
+    expect(selected.selectedPacket.repoLinkUrl).toBe('https://github.com/dylanvu/auto-biographer');
+
+    const runDrafter = vi.fn(async () => ({
+      decision: 'success' as const,
+      delivery_kind: 'single_post' as const,
+      draft_text: 'Built an internal scraper that pulls our X posts into an xt_posts table.',
+      candidate_type: 'ship_update',
+      quote_target_url: null,
+      why_chosen: 'Fresh shipped work with a concrete repo.',
+      receipts: ['repo-backed event'],
+      media_request: null,
+      allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
+    }));
+    const drafted = await draftSelectedCandidate({
+      db: database.pool,
+      selected,
+      runDrafter,
+      resolvePublicRepoLinkUrl: vi.fn(async ({ repoUrl }) => repoUrl),
+    });
+
+    expect(drafted).toMatchObject({
+      outcome: 'ready',
+      package: {
+        deliveryKind: 'thread',
+        draftText: 'Built an internal scraper that pulls our X posts into an xt_posts table.',
+        threadReplyText: 'https://github.com/dylanvu/auto-biographer',
+        mediaRequest: 'screenshot of the x-post scraper output table',
+      },
+    });
+  });
+
+  it('keeps repo-backed originals as a single post when the repo is not public', async () => {
+    const now = new Date('2026-04-15T10:30:00.000Z');
+    const seededEvents = await seedEvents(database.pool, [
+      {
+        source: 'github',
+        sourceId: 'github-private-repo-thread',
+        occurredAt: new Date('2026-04-15T10:20:00.000Z'),
+        author: 'dylanvu',
+        title: 'secret-project push',
+        summary: 'Shipped a private project',
+        urlOrLocator: 'https://github.com/dylanvu/secret-project/commit/abc123',
+        tags: ['repo:dylanvu/secret-project', 'action:push'],
+        rawPayload: {
+          repo: 'dylanvu/secret-project',
+        },
+      },
+    ]);
+    const githubEvent = requireValue(seededEvents[0], 'githubEvent');
+
+    const context = await buildRecentContextPacket({
+      db: database.pool,
+      now: () => now,
+    });
+    const runSelector = vi.fn(async () => ({
+      decision: 'select' as const,
+      candidate_type: 'ship_update',
+      angle: 'Show the shipped private project',
+      why_interesting: 'The project shipped but the repo is private',
+      source_event_ids: [Number(githubEvent.event.id)],
+      artifact_ids: [],
+      primary_anchor: 'Shipped a private project',
+      supporting_points: ['Private repo', 'Fresh push'],
+      quote_target: null,
+      suggested_media_kind: 'image',
+      suggested_media_request: 'screenshot of the shipped feature',
+    }));
+    const selected = await selectCandidate({
+      db: database.pool,
+      context,
+      triggerType: 'scheduled',
+      runSelector,
+    });
+
+    expect(selected.outcome).toBe('select');
+    if (selected.outcome !== 'select') {
+      throw new Error('Expected a selected candidate');
+    }
+
+    const runDrafter = vi.fn(async () => ({
+      decision: 'success' as const,
+      delivery_kind: 'single_post' as const,
+      draft_text: 'Shipped a private project update without leaking the repo.',
+      candidate_type: 'ship_update',
+      quote_target_url: null,
+      why_chosen: 'Fresh shipped work.',
+      receipts: ['private repo event'],
+      media_request: null,
+      allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
+    }));
+    const drafted = await draftSelectedCandidate({
+      db: database.pool,
+      selected,
+      runDrafter,
+      resolvePublicRepoLinkUrl: vi.fn(async () => null),
+    });
+
+    expect(drafted).toMatchObject({
+      outcome: 'ready',
+      package: {
+        deliveryKind: 'single_post',
+        draftText: 'Shipped a private project update without leaking the repo.',
+        threadReplyText: null,
+        mediaRequest: 'screenshot of the shipped feature',
+      },
+    });
   });
 
   it('evaluates scheduled windows in America/New_York even when the host timezone is UTC', async () => {
@@ -949,7 +1192,7 @@ describe('orchestrator Task 10 flow', () => {
         sourceId: 'github-scheduled-draft',
         occurredAt: new Date('2026-04-15T09:55:00.000Z'),
         author: 'dylanvu',
-        title: 'social-posting push',
+        title: 'auto-biographer push',
         summary: 'Scheduled draft path',
       },
     ]);
@@ -1276,6 +1519,60 @@ describe('orchestrator Task 10 flow', () => {
     ]);
   });
 
+  it('sends a plain Telegram notification when a scheduled selector skip is chosen', async () => {
+    await seedEvents(database.pool, [
+      {
+        source: 'github',
+        sourceId: 'github-selector-skip-notification',
+        occurredAt: new Date('2026-04-15T13:55:00.000Z'),
+        author: 'dylanvu',
+        summary: 'Skip this scheduled slot and notify Telegram.',
+      },
+    ]);
+
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const runSelector = vi.fn(async () => ({
+      decision: 'skip' as const,
+      reason: 'Nothing distinct enough to publish yet',
+    }));
+    const runDrafter = vi.fn();
+    const windowsJson = [
+      {
+        name: 'weekday-morning',
+        days: ['wed'],
+        start: '10:00',
+        end: '11:00',
+      },
+    ];
+
+    await runTick({
+      db: database.pool,
+      telegramClient: telegram.client,
+      controlChatId: '-1001234567890',
+      windowsJson,
+      now: () => atLocal('2026-04-15T10:30:00'),
+      randomFractionForSlot: () => 0.5,
+      runSelector,
+      runDrafter,
+    });
+
+    const candidate = await getCandidateById(database.pool, '1');
+
+    expect(runSelector).toHaveBeenCalledOnce();
+    expect(runDrafter).not.toHaveBeenCalled();
+    expect(telegram.sentPackages).toHaveLength(0);
+    expect(telegram.sentMessages).toHaveLength(1);
+    expect(telegram.sentMessages[0]?.text).toBe([
+      'Skipped: selector',
+      'Trigger: scheduled',
+      'Type: skip',
+      'Reason: Nothing distinct enough to publish yet',
+      'Ref: 1',
+    ].join('\n'));
+    expect(candidate?.telegramMessageId).toBeNull();
+    expect(candidate?.status).toBe('selector_skipped');
+  });
+
   it('retries a scheduled slot once after a drafter exception before finalizing it', async () => {
     await seedEvents(database.pool, [
       {
@@ -1494,6 +1791,62 @@ describe('orchestrator Task 10 flow', () => {
       },
     ]);
     expect(telegram.sentPackages).toHaveLength(1);
+  });
+
+  it('sends a plain Telegram notification when an on-demand drafter skip is chosen', async () => {
+    await seedEvents(database.pool, [
+      {
+        source: 'slack_message',
+        sourceId: 'slack-draft-now-skip',
+        occurredAt: new Date('2026-04-15T12:55:00.000Z'),
+        author: 'dylanvu',
+        rawText: 'Draft this right now, unless the drafter skips it.',
+      },
+    ]);
+
+    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
+    const runSelector = vi.fn(async (context: Awaited<ReturnType<typeof buildRecentContextPacket>>) => ({
+      decision: 'select' as const,
+      candidate_type: 'event_summary',
+      angle: 'Skip after selection',
+      why_interesting: 'The drafter skip path should still notify Telegram',
+      source_event_ids: [requireValue(context.events[0], 'context.events[0]').id],
+      artifact_ids: [],
+      primary_anchor: 'An on-demand skip should still be visible',
+      supporting_points: ['selector selected', 'drafter skipped'],
+      quote_target: null,
+      suggested_media_kind: null,
+      suggested_media_request: null,
+    }));
+    const runDrafter = vi.fn(async () => ({
+      decision: 'skip' as const,
+      reason: 'Not concrete enough to draft yet',
+    }));
+
+    const result = await runDraftNow({
+      db: database.pool,
+      telegramClient: telegram.client,
+      runSelector,
+      runDrafter,
+      now: () => atLocal('2026-04-15T13:00:00'),
+    });
+
+    const candidate = await getCandidateById(database.pool, '1');
+
+    expect(result).toEqual({ candidateId: '1' });
+    expect(runSelector).toHaveBeenCalledOnce();
+    expect(runDrafter).toHaveBeenCalledOnce();
+    expect(telegram.sentPackages).toHaveLength(0);
+    expect(telegram.sentMessages).toHaveLength(1);
+    expect(telegram.sentMessages[0]?.text).toBe([
+      'Skipped: drafter',
+      'Trigger: on_demand',
+      'Type: event_summary',
+      'Reason: Not concrete enough to draft yet',
+      'Ref: 1',
+    ].join('\n'));
+    expect(candidate?.telegramMessageId).toBeNull();
+    expect(candidate?.status).toBe('drafter_skipped');
   });
 
   it('applies skip and post-now as action-driven state transitions without publishing', async () => {

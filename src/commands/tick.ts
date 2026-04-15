@@ -10,7 +10,7 @@ import { createSlackLinksSource } from '../sources/slack-links-source';
 import { createSlackMessagesSource } from '../sources/slack-messages-source';
 import { createTelegramClient } from '../telegram/client';
 
-const SOURCE_SYNC_LOOKBACK_HOURS = 12;
+const SOURCE_SYNC_LOOKBACK_HOURS = 16;
 
 function buildSyncSources(input: {
   db: Parameters<typeof createGitHubSource>[0];
@@ -48,6 +48,7 @@ function buildSyncSources(input: {
       sync: () =>
         createGitHubSource(input.db, {
           githubUsername: input.env.githubUsername,
+          lookbackHours: SOURCE_SYNC_LOOKBACK_HOURS,
         }).sync(),
     },
   ];
