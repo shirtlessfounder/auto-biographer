@@ -5,6 +5,9 @@ const DEFAULT_LOOKBACK_HOURS = 16;
 const DEFAULT_RECENT_PUBLISHED_POSTS_LIMIT = 5;
 const DEFAULT_PENDING_APPROVAL_CANDIDATES_LIMIT = 5;
 const ACTIVE_PENDING_APPROVAL_STATUSES = ['pending_approval', 'reminded', 'held'] as const;
+const MAX_CONTEXT_EVENT_RAW_TEXT_CHARS = 2000;
+const MAX_CONTEXT_ARTIFACT_TEXT_CHARS = 600;
+const MAX_CONTEXT_ARTIFACTS_PER_EVENT = 12;
 
 const CONTEXT_SOURCES: readonly NormalizedEventSource[] = [
   'slack_message',
@@ -136,13 +139,25 @@ function subtractHours(value: Date, hours: number): Date {
   return new Date(value.getTime() - hours * 60 * 60 * 1000);
 }
 
+function truncateContextText(value: string | null, maxLength: number): string | null {
+  if (!value) {
+    return value;
+  }
+
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
 function mapArtifactRow(row: ArtifactRow): ContextArtifact {
   return {
     id: parseDbId(row.id),
     eventId: parseDbId(row.event_id),
     artifactType: row.artifact_type,
     artifactKey: row.artifact_key,
-    contentText: row.content_text,
+    contentText: truncateContextText(row.content_text, MAX_CONTEXT_ARTIFACT_TEXT_CHARS),
     contentJson: row.content_json,
     sourceUrl: row.source_url,
   };
@@ -170,6 +185,23 @@ function mapPendingApprovalCandidateRow(row: PendingApprovalCandidateRow): Pendi
     quoteTargetUrl: row.quote_target_url,
     mediaRequest: row.media_request,
   };
+}
+
+function limitArtifactsForContext(artifacts: readonly ContextArtifact[]): ContextArtifact[] {
+  if (artifacts.length <= MAX_CONTEXT_ARTIFACTS_PER_EVENT) {
+    return [...artifacts];
+  }
+
+  const headCount = Math.ceil(MAX_CONTEXT_ARTIFACTS_PER_EVENT / 2);
+  const tailCount = MAX_CONTEXT_ARTIFACTS_PER_EVENT - headCount;
+  const selected = [...artifacts.slice(0, headCount), ...artifacts.slice(-tailCount)];
+  const deduped = new Map<number, ContextArtifact>();
+
+  for (const artifact of selected) {
+    deduped.set(artifact.id, artifact);
+  }
+
+  return Array.from(deduped.values());
 }
 
 export async function buildRecentContextPacket({
@@ -295,11 +327,11 @@ export async function buildRecentContextPacket({
         urlOrLocator: row.url_or_locator,
         title: row.title,
         summary: row.summary,
-        rawText: row.raw_text,
+        rawText: truncateContextText(row.raw_text, MAX_CONTEXT_EVENT_RAW_TEXT_CHARS),
         tags: row.tags,
         artifactRefs: row.artifact_refs,
         rawPayload: row.raw_payload,
-        artifacts: artifactsByEventId.get(eventId) ?? [],
+        artifacts: limitArtifactsForContext(artifactsByEventId.get(eventId) ?? []),
       };
     }),
     recentPublishedPosts: recentPublishedPostsResult.rows.map(mapPublishedPostRow),
