@@ -593,6 +593,42 @@ describe('orchestrator Task 10 flow', () => {
     ]);
   });
 
+  it('truncates oversized event context before sending it to Hermes', async () => {
+    const now = new Date('2026-04-15T20:00:00.000Z');
+    const oversizedRawText = `transcript:${'x'.repeat(6000)}`;
+
+    await seedEvents(database.pool, [
+      {
+        source: 'agent_conversation',
+        sourceId: 'innies-oversized-context',
+        occurredAt: new Date('2026-04-15T19:40:00.000Z'),
+        author: 'shirtless',
+        title: 'Long innies session',
+        summary: 'This session should be condensed for selector context.',
+        rawText: oversizedRawText,
+        artifacts: Array.from({ length: 20 }, (_, index) => ({
+          artifactType: 'message_excerpt',
+          artifactKey: `excerpt:${String(index)}`,
+          contentText: `artifact-${String(index)}:${'y'.repeat(1500)}`,
+        })),
+      },
+    ]);
+
+    const context = await buildRecentContextPacket({
+      db: database.pool,
+      now: () => now,
+    });
+    const oversizedEvent = context.events.find((event) => event.sourceId === 'innies-oversized-context');
+
+    expect(oversizedEvent).toBeDefined();
+    expect(oversizedEvent?.rawText?.length).toBeLessThanOrEqual(2000);
+    expect(oversizedEvent?.rawText?.endsWith('…')).toBe(true);
+    expect(oversizedEvent?.artifacts).toHaveLength(12);
+    expect(oversizedEvent?.artifacts.every((artifact) => (artifact.contentText ?? '').length <= 600)).toBe(true);
+    expect(oversizedEvent?.artifacts[0]?.artifactKey).toBe('excerpt:0');
+    expect(oversizedEvent?.artifacts.at(-1)?.artifactKey).toBe('excerpt:19');
+  });
+
   it('persists a selector skip cleanly and stops before drafting', async () => {
     const now = new Date('2026-04-15T12:00:00.000Z');
 
