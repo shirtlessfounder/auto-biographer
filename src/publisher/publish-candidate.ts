@@ -215,6 +215,15 @@ export async function publishCandidate(input: {
       };
     }
 
+    try {
+      await input.telegramClient.sendMessage({
+        text: `Posted candidate #${input.candidateId}: ${published.url}`,
+        disableWebPagePreview: false,
+      });
+    } catch {
+      // Post-link notifications are best-effort only.
+    }
+
     return {
       outcome: 'published',
       xPostId: result.rows[0].x_post_id,

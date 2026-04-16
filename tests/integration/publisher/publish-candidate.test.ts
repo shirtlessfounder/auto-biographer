@@ -277,7 +277,9 @@ describe('publishCandidate', () => {
       { event_id: event.event.id, artifact_id: null },
       { event_id: event.event.id, artifact_id: artifact.id },
     ]);
-    expect(telegram.sentMessages).toEqual([]);
+    expect(telegram.sentMessages).toEqual([
+      `Posted candidate #${candidate.id}: https://x.com/bicep_pump/status/1900000000000000001`,
+    ]);
   });
 
   it('fails delivery and notifies telegram when a stored photo batch exceeds the v1 limit', async () => {

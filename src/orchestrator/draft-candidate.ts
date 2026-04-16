@@ -79,6 +79,22 @@ function truncateTweetText(value: string, maxLength: number): string {
   return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
+function buildDefaultOriginalPostMediaRequest(selectedPacket: SelectedCandidatePacket): string | null {
+  if (selectedPacket.selection.quoteTargetUrl !== null) {
+    return null;
+  }
+
+  if (selectedPacket.selection.suggestedMediaRequest) {
+    return selectedPacket.selection.suggestedMediaRequest;
+  }
+
+  if (selectedPacket.repoLinkUrl) {
+    return 'screenshot of the repo, README, terminal output, or shipped artifact that best supports the update';
+  }
+
+  return `image or screenshot that best supports: ${truncateTweetText(selectedPacket.selection.primaryAnchor, 120)}`;
+}
+
 function buildForcedDraftFromSelection(input: {
   selectedPacket: SelectedCandidatePacket;
   drafterSkipReason: string;
@@ -103,7 +119,7 @@ function buildForcedDraftFromSelection(input: {
     quote_target_url: selection.quoteTargetUrl,
     why_chosen: `forced tweet after drafter skip: ${input.drafterSkipReason}`,
     receipts: [angle, ...selection.supportingPoints].slice(0, 3).map((value) => truncateTweetText(value, 160)),
-    media_request: selection.suggestedMediaRequest,
+    media_request: buildDefaultOriginalPostMediaRequest(input.selectedPacket),
     allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
   };
 }
@@ -176,7 +192,9 @@ export async function draftSelectedCandidate({
     assertTweetLength(threadReplyText, 'thread_reply_text');
   }
 
-  const mediaRequest = drafterResult.media_request ?? selected.selectedPacket.selection.suggestedMediaRequest;
+  const mediaRequest = drafterResult.media_request
+    ?? selected.selectedPacket.selection.suggestedMediaRequest
+    ?? buildDefaultOriginalPostMediaRequest(selected.selectedPacket);
   const candidate = await transitionCandidate(db, {
     candidateId: selected.candidate.id,
     toStatus: 'pending_approval',

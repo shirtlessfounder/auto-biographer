@@ -1210,11 +1210,11 @@ describe('orchestrator Task 10 flow', () => {
       decision: 'select' as const,
       candidate_type: 'ship_update',
       angle: 'Send the scheduled slot',
-      why_interesting: 'This slot should yield one draft and one reminder',
+      why_interesting: 'This slot should yield one draft and no reminder resend',
       source_event_ids: [requireValue(context.events[0], 'context.events[0]').id],
       artifact_ids: [],
       primary_anchor: 'The scheduled slot is due',
-      supporting_points: ['One package', 'One reminder'],
+      supporting_points: ['One package', 'No reminder resend'],
       quote_target: null,
       suggested_media_kind: null,
       suggested_media_request: null,
@@ -1259,6 +1259,7 @@ describe('orchestrator Task 10 flow', () => {
       candidateType: 'ship_update',
       draftText: 'Scheduled draft ready for review.',
     });
+    expect(telegram.sentPackages[0]?.mediaRequest).toBeTruthy();
 
     await runTick({
       db: database.pool,
@@ -1284,7 +1285,7 @@ describe('orchestrator Task 10 flow', () => {
       runSelector,
       runDrafter,
     });
-    expect(telegram.sentPackages).toHaveLength(2);
+    expect(telegram.sentPackages).toHaveLength(1);
 
     await runTick({
       db: database.pool,
@@ -1297,7 +1298,7 @@ describe('orchestrator Task 10 flow', () => {
       runSelector,
       runDrafter,
     });
-    expect(telegram.sentPackages).toHaveLength(2);
+    expect(telegram.sentPackages).toHaveLength(1);
 
     const candidates = await database.pool.query<{
       id: string;
@@ -1320,9 +1321,9 @@ describe('orchestrator Task 10 flow', () => {
     );
 
     expect(candidates.rows).toHaveLength(1);
-    expect(candidates.rows[0]?.status).toBe('reminded');
+    expect(candidates.rows[0]?.status).toBe('pending_approval');
     expect(candidates.rows[0]?.deadline_at?.getTime()).toBe(atLocal('2026-04-15T10:45:00').getTime());
-    expect(candidates.rows[0]?.reminder_sent_at?.getTime()).toBe(atLocal('2026-04-15T10:40:00').getTime());
+    expect(candidates.rows[0]?.reminder_sent_at).toBeNull();
     expect(slotClaims.rows).toEqual([
       {
         state_key: 'scheduled_window_slot:weekday-morning:2026-04-15',

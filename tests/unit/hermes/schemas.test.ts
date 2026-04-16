@@ -186,6 +186,8 @@ describe('runHermes', () => {
     expect(prompt).toContain('repoLinkUrl');
     expect(prompt).toContain('2-post thread');
     expect(prompt).toContain('media_request');
+    expect(prompt).toContain('must include a concrete `media_request`');
+    expect(prompt).toContain('For original posts about shipped work');
   });
 
   it('rejects invalid json on stdout', async () => {
