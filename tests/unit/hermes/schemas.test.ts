@@ -121,6 +121,8 @@ describe('runHermes', () => {
     expect(prompt).toContain('repo_created');
     expect(prompt).toContain('top-tier');
     expect(prompt).toContain('quote_target');
+    expect(prompt).toContain('Complaints are signal');
+    expect(prompt).toContain('empty whining');
   });
 
   it('accepts selector skip results without a caller-provided output kind', async () => {
