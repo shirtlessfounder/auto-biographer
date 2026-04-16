@@ -351,7 +351,7 @@ export async function selectCandidate({
   db,
   context,
   triggerType,
-  fallbackOnSkip = false,
+  fallbackOnSkip = true,
   runSelector,
   hermesBin,
   hermesExecutor,

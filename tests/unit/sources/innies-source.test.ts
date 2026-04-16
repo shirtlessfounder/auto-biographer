@@ -87,7 +87,7 @@ async function createTestDatabase(): Promise<TestDatabase> {
     '-l',
     logFilePath,
     '-o',
-    `-h 127.0.0.1 -p ${String(port)}`,
+    `-h 127.0.0.1 -p ${String(port)} -k ${baseDirectory}`,
     '-w',
     'start',
   ]);

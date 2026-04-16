@@ -42,6 +42,7 @@ type CandidateRow = {
 };
 
 const ACTIVE_APPROVAL_STATUSES = ['pending_approval', 'reminded', 'held'] as const;
+const AUTOMATION_CANDIDATE_STATUSES = [...ACTIVE_APPROVAL_STATUSES, 'post_requested'] as const;
 const AUTO_POSTABLE_STATUSES = ['pending_approval', 'reminded'] as const;
 const REMINDER_LEAD_MINUTES = 5;
 
@@ -131,7 +132,7 @@ export async function listCandidatesForAutomation(db: Queryable): Promise<Candid
       where status = any($1::text[])
       order by id asc
     `,
-    [ACTIVE_APPROVAL_STATUSES],
+    [AUTOMATION_CANDIDATE_STATUSES],
   );
 
   return result.rows.map(mapCandidateRow);

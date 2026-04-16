@@ -69,6 +69,45 @@ function buildDrafterRunner(input: Pick<DraftSelectedCandidateInput, 'runDrafter
     });
 }
 
+function truncateTweetText(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function buildForcedDraftFromSelection(input: {
+  selectedPacket: SelectedCandidatePacket;
+  drafterSkipReason: string;
+}): HermesDrafterPayload {
+  const selection = input.selectedPacket.selection;
+  const primary = truncateTweetText(selection.primaryAnchor, 220);
+  const support = selection.supportingPoints[0] ? truncateTweetText(selection.supportingPoints[0], 120) : null;
+  const angle = truncateTweetText(selection.angle, 140);
+
+  const draftText = truncateTweetText(
+    support && !primary.toLowerCase().includes(support.toLowerCase())
+      ? `${primary} — ${support}`
+      : primary,
+    280,
+  );
+
+  return {
+    decision: 'success',
+    delivery_kind: 'single_post',
+    draft_text: draftText,
+    candidate_type: selection.candidateType,
+    quote_target_url: selection.quoteTargetUrl,
+    why_chosen: `forced tweet after drafter skip: ${input.drafterSkipReason}`,
+    receipts: [angle, ...selection.supportingPoints].slice(0, 3).map((value) => truncateTweetText(value, 160)),
+    media_request: selection.suggestedMediaRequest,
+    allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
+  };
+}
+
 function assertTweetLength(text: string, label: string): void {
   if (text.length > 280) {
     throw new Error(`${label} exceeds the 280 character X limit (${String(text.length)})`);
@@ -115,21 +154,13 @@ export async function draftSelectedCandidate({
   resolvePublicRepoLinkUrl,
 }: DraftSelectedCandidateInput): Promise<DraftSelectedCandidateOutcome> {
   const drafter = buildDrafterRunner({ runDrafter, hermesBin, hermesExecutor });
-  const drafterResult = await drafter(selected.selectedPacket);
-
-  if (drafterResult.decision === 'skip') {
-    return {
-      outcome: 'skip',
-      drafterResult,
-      package: null,
-      candidate: await transitionCandidate(db, {
-        candidateId: selected.candidate.id,
-        toStatus: 'drafter_skipped',
-        drafterOutputJson: drafterResult,
-        errorDetails: drafterResult.reason,
-      }),
-    };
-  }
+  const rawDrafterResult = await drafter(selected.selectedPacket);
+  const drafterResult = rawDrafterResult.decision === 'skip'
+    ? buildForcedDraftFromSelection({
+        selectedPacket: selected.selectedPacket,
+        drafterSkipReason: rawDrafterResult.reason,
+      })
+    : rawDrafterResult;
 
   const quoteTargetUrl = QUOTE_TWEETS_ENABLED
     ? drafterResult.quote_target_url ?? selected.selectedPacket.selection.quoteTargetUrl

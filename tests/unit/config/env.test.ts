@@ -32,6 +32,7 @@ describe('loadEnv', () => {
       telegramControlBotToken: validEnv.TELEGRAM_CONTROL_BOT_TOKEN,
       telegramControlChatId: validEnv.TELEGRAM_CONTROL_CHAT_ID,
       hermesBin: validEnv.HERMES_BIN,
+      hermesAgentDir: '/home/ubuntu/.hermes/hermes-agent',
       xBearerToken: validEnv.X_BEARER_TOKEN,
       githubUsername: validEnv.GITHUB_USERNAME,
       inniesBuyerKeyName: validEnv.INNIES_BUYER_KEY_NAME,

@@ -8,7 +8,7 @@ import { createGitHubSource } from '../sources/github-source';
 import { createInniesSource } from '../sources/innies-source';
 import { createSlackLinksSource } from '../sources/slack-links-source';
 import { createSlackMessagesSource } from '../sources/slack-messages-source';
-import { createTelegramClient } from '../telegram/client';
+import { createHermesBackedTelegramClient } from '../telegram/hermes-client';
 
 const SOURCE_SYNC_LOOKBACK_HOURS = 16;
 
@@ -70,9 +70,10 @@ export async function runTickCommand(argv: string[] = process.argv.slice(2)): Pr
   const env = loadEnv(process.env);
   const args = parseTickArgs(argv);
   const pool = createPool(env.databaseUrl);
-  const telegramClient = createTelegramClient({
+  const telegramClient = createHermesBackedTelegramClient({
     botToken: env.telegramControlBotToken,
     chatId: env.telegramControlChatId,
+    hermesAgentDir: env.hermesAgentDir,
   });
   const xLookupClient = createXClient({
     bearerToken: env.xBearerToken,

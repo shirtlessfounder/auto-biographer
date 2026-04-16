@@ -15,6 +15,7 @@ import { createEventsRepository } from '../../../src/db/repositories/events-repo
 import { createPublishedPostsRepository } from '../../../src/db/repositories/published-posts-repository';
 import { createRuntimeStateRepository } from '../../../src/db/repositories/runtime-state-repository';
 import { createTelegramActionsRepository } from '../../../src/db/repositories/telegram-actions-repository';
+import { createCandidateControlMessagesRepository } from '../../../src/db/repositories/candidate-control-messages-repository';
 
 const execFileAsync = promisify(execFile);
 
@@ -90,7 +91,7 @@ async function createTestDatabase(): Promise<TestDatabase> {
     '-l',
     logFilePath,
     '-o',
-    `-h 127.0.0.1 -p ${String(port)}`,
+    `-h 127.0.0.1 -p ${String(port)} -k ${baseDirectory}`,
     '-w',
     'start',
   ]);
@@ -180,8 +181,9 @@ describe('database repositories', () => {
     expect(countResult.rows[0]?.count).toBe('1');
   });
 
-  it('creates candidates, updates fields, and transitions status atomically', async () => {
+  it('creates candidates, tracks multiple control messages, and replaces media by any mapped telegram message id', async () => {
     const candidatesRepository = createCandidatesRepository(database.pool);
+    const controlMessagesRepository = createCandidateControlMessagesRepository(database.pool);
     const firstMediaBatch = {
       kind: 'telegram_photo_batch',
       replyMessageId: 9001,
@@ -191,7 +193,7 @@ describe('database repositories', () => {
     };
     const nextMediaBatch = {
       kind: 'telegram_photo_batch',
-      replyMessageId: 9001,
+      replyMessageId: 9002,
       mediaGroupId: 'album-1',
       capturedAt: '2026-04-14T21:45:00.000Z',
       photos: [
@@ -222,16 +224,33 @@ describe('database repositories', () => {
       toStatus: 'pending_approval',
       reminderSentAt: new Date('2026-04-05T12:10:00.000Z'),
     });
+
+    await controlMessagesRepository.recordControlMessage({
+      candidateId: created.id,
+      telegramMessageId: '9001',
+      messageKind: 'draft',
+    });
+    await controlMessagesRepository.recordControlMessage({
+      candidateId: created.id,
+      telegramMessageId: '9002',
+      messageKind: 'reminder',
+    });
+
     const rejectedTransition = await candidatesRepository.transitionStatus({
       id: created.id,
       fromStatuses: ['drafting'],
       toStatus: 'published',
     });
-    const replaced = await candidatesRepository.replaceMediaBatchByTelegramMessageId({
+    const replacedByOriginal = await candidatesRepository.replaceMediaBatchByTelegramMessageId({
       telegramMessageId: '9001',
       allowedStatuses: ['pending_approval', 'reminded', 'held'],
       mediaBatchJson: nextMediaBatch,
     });
+    const resolvedReminder = await controlMessagesRepository.findCandidateByTelegramMessageId({
+      telegramMessageId: '9002',
+      allowedStatuses: ['pending_approval', 'reminded', 'held'],
+    });
+    const controlMessages = await controlMessagesRepository.listControlMessages(created.id);
 
     expect(updated.finalPostText).toBe('hello world');
     expect(updated.quoteTargetUrl).toBe('https://x.com/example/status/1');
@@ -241,7 +260,16 @@ describe('database repositories', () => {
     expect(transitioned?.status).toBe('pending_approval');
     expect(transitioned?.reminderSentAt?.toISOString()).toBe('2026-04-05T12:10:00.000Z');
     expect(rejectedTransition).toBeNull();
-    expect(replaced?.mediaBatchJson).toEqual(nextMediaBatch);
+    expect(replacedByOriginal?.mediaBatchJson).toEqual(nextMediaBatch);
+    expect(resolvedReminder).toEqual({
+      candidateId: created.id,
+      candidateStatus: 'pending_approval',
+      messageKind: 'reminder',
+    });
+    expect(controlMessages.map((message) => ({ telegramMessageId: message.telegramMessageId, messageKind: message.messageKind }))).toEqual([
+      { telegramMessageId: '9001', messageKind: 'draft' },
+      { telegramMessageId: '9002', messageKind: 'reminder' },
+    ]);
   });
 
   it('gets and sets runtime state', async () => {

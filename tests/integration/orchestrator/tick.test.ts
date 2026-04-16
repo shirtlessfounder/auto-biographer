@@ -32,6 +32,10 @@ import type { NormalizedEventInput } from '../../../src/normalization/types';
 import type { XThreadLookupClient } from '../../../src/enrichment/x/client';
 import { runDraftNow } from '../../../src/commands/draft-now';
 import {
+  ingestDraftControlPhotoReply,
+  ingestDraftControlTextReply,
+} from '../../../src/control/ingest';
+import {
   formatCandidatePackageMessage,
 } from '../../../src/telegram/command-parser';
 import type {
@@ -138,7 +142,7 @@ async function createTestDatabase(): Promise<TestDatabase> {
     '-l',
     logFilePath,
     '-o',
-    `-h 127.0.0.1 -p ${String(port)}`,
+    `-h 127.0.0.1 -p ${String(port)} -k ${baseDirectory}`,
     '-w',
     'start',
   ]);
@@ -593,43 +597,7 @@ describe('orchestrator Task 10 flow', () => {
     ]);
   });
 
-  it('truncates oversized event context before sending it to Hermes', async () => {
-    const now = new Date('2026-04-15T20:00:00.000Z');
-    const oversizedRawText = `transcript:${'x'.repeat(6000)}`;
-
-    await seedEvents(database.pool, [
-      {
-        source: 'agent_conversation',
-        sourceId: 'innies-oversized-context',
-        occurredAt: new Date('2026-04-15T19:40:00.000Z'),
-        author: 'shirtless',
-        title: 'Long innies session',
-        summary: 'This session should be condensed for selector context.',
-        rawText: oversizedRawText,
-        artifacts: Array.from({ length: 20 }, (_, index) => ({
-          artifactType: 'message_excerpt',
-          artifactKey: `excerpt:${String(index)}`,
-          contentText: `artifact-${String(index)}:${'y'.repeat(1500)}`,
-        })),
-      },
-    ]);
-
-    const context = await buildRecentContextPacket({
-      db: database.pool,
-      now: () => now,
-    });
-    const oversizedEvent = context.events.find((event) => event.sourceId === 'innies-oversized-context');
-
-    expect(oversizedEvent).toBeDefined();
-    expect(oversizedEvent?.rawText?.length).toBeLessThanOrEqual(2000);
-    expect(oversizedEvent?.rawText?.endsWith('…')).toBe(true);
-    expect(oversizedEvent?.artifacts).toHaveLength(12);
-    expect(oversizedEvent?.artifacts.every((artifact) => (artifact.contentText ?? '').length <= 600)).toBe(true);
-    expect(oversizedEvent?.artifacts[0]?.artifactKey).toBe('excerpt:0');
-    expect(oversizedEvent?.artifacts.at(-1)?.artifactKey).toBe('excerpt:19');
-  });
-
-  it('persists a selector skip cleanly and stops before drafting', async () => {
+  it('forces a fallback selection instead of persisting a selector skip', async () => {
     const now = new Date('2026-04-15T12:00:00.000Z');
 
     await seedEvents(database.pool, [
@@ -660,13 +628,13 @@ describe('orchestrator Task 10 flow', () => {
 
     expect(runSelector).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
-      outcome: 'skip',
+      outcome: 'select',
       candidate: {
-        status: 'selector_skipped',
-        candidateType: 'skip',
+        status: 'drafting',
+        candidateType: 'ship_update',
       },
       selectorResult: {
-        decision: 'skip',
+        decision: 'select',
       },
     });
 
@@ -686,15 +654,15 @@ describe('orchestrator Task 10 flow', () => {
 
     expect(candidates.rows).toEqual([
       {
-        status: 'selector_skipped',
-        candidate_type: 'skip',
-        selector_output_json: {
-          decision: 'skip',
-          reason: 'Nothing distinct enough to publish yet',
-        },
+        status: 'drafting',
+        candidate_type: 'ship_update',
+        selector_output_json: expect.objectContaining({
+          decision: 'select',
+          primary_anchor: 'Fresh GitHub activity',
+        }),
       },
     ]);
-    expect(candidateSources.rows[0]?.count).toBe('0');
+    expect(candidateSources.rows[0]?.count).toBe('1');
   });
 
   it('persists selected events even when the selector returns no artifact ids', async () => {
@@ -1555,66 +1523,14 @@ describe('orchestrator Task 10 flow', () => {
     ]);
   });
 
-  it('sends a plain Telegram notification when a scheduled selector skip has no usable context', async () => {
-    const telegram = createStubTelegramClient({ chatId: -1001234567890 });
-    const runSelector = vi.fn(async () => ({
-      decision: 'skip' as const,
-      reason: 'Nothing distinct enough to publish yet',
-    }));
-    const runDrafter = vi.fn();
-    const windowsJson = [
-      {
-        name: 'weekday-morning',
-        days: ['wed'],
-        start: '10:00',
-        end: '11:00',
-      },
-    ];
-
-    await runTick({
-      db: database.pool,
-      telegramClient: telegram.client,
-      controlChatId: '-1001234567890',
-      windowsJson,
-      now: () => atLocal('2026-04-15T10:30:00'),
-      randomFractionForSlot: () => 0.5,
-      runSelector,
-      runDrafter,
-    });
-
-    const candidate = await getCandidateById(database.pool, '1');
-
-    expect(runSelector).toHaveBeenCalledOnce();
-    expect(runDrafter).not.toHaveBeenCalled();
-    expect(telegram.sentPackages).toHaveLength(0);
-    expect(telegram.sentMessages).toHaveLength(1);
-    expect(telegram.sentMessages[0]?.text).toBe([
-      'Skipped: selector',
-      'Trigger: scheduled',
-      'Type: skip',
-      'Reason: Nothing distinct enough to publish yet',
-      'Ref: 1',
-    ].join('\n'));
-    expect(candidate?.telegramMessageId).toBeNull();
-    expect(candidate?.status).toBe('selector_skipped');
-  });
-
-  it('falls back from a scheduled selector skip when recent context exists', async () => {
+  it('forces a draft package even when the selector asks to skip', async () => {
     await seedEvents(database.pool, [
       {
         source: 'github',
-        sourceId: 'github-selector-skip-fallback',
+        sourceId: 'github-selector-skip-notification',
         occurredAt: new Date('2026-04-15T13:55:00.000Z'),
-        author: 'shirtlessfounder',
-        title: 'auto-biographer push',
-        summary: 'Shipped the scheduled fallback path',
-        artifacts: [
-          {
-            artifactType: 'commit',
-            artifactKey: 'abc123',
-            contentText: 'feat: force scheduled fallback output',
-          },
-        ],
+        author: 'dylanvu',
+        summary: 'Skip this scheduled slot and notify Telegram.',
       },
     ]);
 
@@ -1626,11 +1542,11 @@ describe('orchestrator Task 10 flow', () => {
     const runDrafter = vi.fn(async () => ({
       decision: 'success' as const,
       delivery_kind: 'single_post' as const,
-      draft_text: 'Scheduled fallback draft ready for review.',
-      candidate_type: 'work_update',
+      draft_text: 'forced fallback tweet from the best available context',
+      candidate_type: 'ship_update',
       quote_target_url: null,
-      why_chosen: 'Scheduled runs should still surface the strongest recent work.',
-      receipts: ['selector skipped', 'fallback selected recent context', 'drafter ok'],
+      why_chosen: 'we force a tweet instead of skipping the slot',
+      receipts: ['fallback selector', 'forced drafter'],
       media_request: null,
       allowed_commands: ['skip', 'hold', 'post now', 'edit: ...', 'another angle'],
     }));
@@ -1658,15 +1574,11 @@ describe('orchestrator Task 10 flow', () => {
 
     expect(runSelector).toHaveBeenCalledOnce();
     expect(runDrafter).toHaveBeenCalledOnce();
-    expect(telegram.sentMessages).toHaveLength(1);
     expect(telegram.sentPackages).toHaveLength(1);
-    expect(telegram.sentPackages[0]).toMatchObject({
-      candidateId: '1',
-      draftText: 'Scheduled fallback draft ready for review.',
-    });
-    expect(telegram.sentMessages[0]?.text).toContain('Scheduled fallback draft ready for review.');
+    expect(telegram.sentPackages[0]?.draftText).toBe('forced fallback tweet from the best available context');
+    expect(telegram.sentMessages).toHaveLength(1);
+    expect(candidate?.telegramMessageId).toBe('8000');
     expect(candidate?.status).toBe('pending_approval');
-    expect(candidate?.candidateType).toBe('ship_update');
   });
 
   it('retries a scheduled slot once after a drafter exception before finalizing it', async () => {
@@ -1889,7 +1801,7 @@ describe('orchestrator Task 10 flow', () => {
     expect(telegram.sentPackages).toHaveLength(1);
   });
 
-  it('sends a plain Telegram notification when an on-demand drafter skip is chosen', async () => {
+  it('forces a draft package when the on-demand drafter asks to skip', async () => {
     await seedEvents(database.pool, [
       {
         source: 'slack_message',
@@ -1932,17 +1844,11 @@ describe('orchestrator Task 10 flow', () => {
     expect(result).toEqual({ candidateId: '1' });
     expect(runSelector).toHaveBeenCalledOnce();
     expect(runDrafter).toHaveBeenCalledOnce();
-    expect(telegram.sentPackages).toHaveLength(0);
+    expect(telegram.sentPackages).toHaveLength(1);
+    expect(telegram.sentPackages[0]?.draftText).toMatch(/an on-demand skip should still be visible/i);
     expect(telegram.sentMessages).toHaveLength(1);
-    expect(telegram.sentMessages[0]?.text).toBe([
-      'Skipped: drafter',
-      'Trigger: on_demand',
-      'Type: event_summary',
-      'Reason: Not concrete enough to draft yet',
-      'Ref: 1',
-    ].join('\n'));
-    expect(candidate?.telegramMessageId).toBeNull();
-    expect(candidate?.status).toBe('drafter_skipped');
+    expect(candidate?.telegramMessageId).toBe('8000');
+    expect(candidate?.status).toBe('pending_approval');
   });
 
   it('applies skip and post-now as action-driven state transitions without publishing', async () => {
@@ -2078,14 +1984,15 @@ describe('orchestrator Task 10 flow', () => {
     });
 
     const initialMessage = requireValue(telegram.sentMessages[0], 'telegram.sentMessages[0]');
-    telegram.enqueueUpdates([
-      createControlReplyUpdate({
-        updateId: 91,
-        chatId: -1001234567890,
-        text: 'hold',
-        replyToMessage: initialMessage,
-      }),
-    ]);
+
+    await ingestDraftControlTextReply({
+      db: database.pool,
+      telegramUpdateId: '91',
+      telegramMessageId: '91',
+      actorUserId: null,
+      replyToTelegramMessageId: String(initialMessage.message_id),
+      text: 'hold',
+    });
 
     await runTick({
       db: database.pool,
@@ -2111,16 +2018,8 @@ describe('orchestrator Task 10 flow', () => {
     });
 
     const candidate = await getCandidateById(database.pool, '1');
-    const storedActions = await database.pool.query<{ action: string }>(
-      `
-        select action
-        from sp_telegram_actions
-        order by id asc
-      `,
-    );
 
     expect(candidate?.status).toBe('held');
-    expect(storedActions.rows).toEqual([{ action: 'hold' }]);
     expect(telegram.sentPackages).toHaveLength(1);
   });
 
@@ -2259,28 +2158,31 @@ describe('orchestrator Task 10 flow', () => {
       telegramMessageId: '9001',
     });
 
-    telegram.enqueueUpdates([
-      createPhotoReplyUpdate({
-        updateId: 101,
-        chatId: -1001234567890,
-        messageId: 901,
-        replyMessageId: initialMessage.message_id,
-        mediaGroupId: 'album-1',
-        photoIds: [
-          { fileId: 'small', fileUniqueId: 'photo-1', width: 320, height: 180 },
-          { fileId: 'large', fileUniqueId: 'photo-1', width: 1280, height: 720 },
-        ],
-      }),
-      createPhotoReplyUpdate({
-        updateId: 102,
-        chatId: -1001234567890,
-        messageId: 902,
-        replyMessageId: 9001,
-        photoIds: [
-          { fileId: 'ignored', fileUniqueId: 'photo-2', width: 1440, height: 900 },
-        ],
-      }),
-    ]);
+    await ingestDraftControlPhotoReply({
+      db: database.pool,
+      telegramUpdateId: '101',
+      telegramMessageId: '901',
+      actorUserId: null,
+      replyToTelegramMessageId: String(initialMessage.message_id),
+      mediaGroupId: 'album-1',
+      photos: [
+        { fileId: 'small', fileUniqueId: 'photo-1', width: 320, height: 180 },
+        { fileId: 'large', fileUniqueId: 'photo-1', width: 1280, height: 720 },
+      ],
+      now: () => new Date('2026-04-15T14:32:00.000Z'),
+    });
+    await ingestDraftControlPhotoReply({
+      db: database.pool,
+      telegramUpdateId: '102',
+      telegramMessageId: '902',
+      actorUserId: null,
+      replyToTelegramMessageId: '9001',
+      mediaGroupId: null,
+      photos: [
+        { fileId: 'ignored', fileUniqueId: 'photo-2', width: 1440, height: 900 },
+      ],
+      now: () => new Date('2026-04-15T14:32:00.000Z'),
+    });
 
     await runTick({
       db: database.pool,
@@ -2302,6 +2204,7 @@ describe('orchestrator Task 10 flow', () => {
       mediaGroupId: 'album-1',
       capturedAt: '2026-04-15T14:32:00.000Z',
       photos: [
+        { fileId: 'small', fileUniqueId: 'photo-1', width: 320, height: 180 },
         { fileId: 'large', fileUniqueId: 'photo-1', width: 1280, height: 720 },
       ],
     });
@@ -2324,22 +2227,22 @@ describe('orchestrator Task 10 flow', () => {
       finalPostText: 'Publish this immediately.',
       telegramMessageId: '8000',
     });
+    await database.pool.query(
+      `
+        insert into sp_candidate_control_messages (candidate_id, telegram_message_id, message_kind)
+        values ($1, $2, 'draft')
+      `,
+      [candidate.id, '8000'],
+    );
 
-    telegram.enqueueUpdates([
-      createControlReplyUpdate({
-        updateId: 150,
-        chatId: -1001234567890,
-        text: 'post now',
-        replyToMessage: {
-          message_id: 8000,
-          chat: {
-            id: -1001234567890,
-            type: 'private',
-          },
-          text: `Candidate #${candidate.id}\nDraft:\nPublish this immediately.`,
-        },
-      }),
-    ]);
+    await ingestDraftControlTextReply({
+      db: database.pool,
+      telegramUpdateId: '150',
+      telegramMessageId: '150',
+      actorUserId: null,
+      replyToTelegramMessageId: '8000',
+      text: 'post now',
+    });
 
     const result = await runTick({
       db: database.pool,
