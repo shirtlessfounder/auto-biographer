@@ -123,6 +123,10 @@ describe('runHermes', () => {
     expect(prompt).toContain('quote_target');
     expect(prompt).toContain('Complaints are signal');
     expect(prompt).toContain('empty whining');
+    expect(prompt).toContain('Nothing in the context is noise by default');
+    expect(prompt).toContain('Assume the context is signal and tweetable');
+    expect(prompt).toContain('meaningfully changed');
+    expect(prompt).toContain('follow-up or update tweets');
   });
 
   it('accepts selector skip results without a caller-provided output kind', async () => {
