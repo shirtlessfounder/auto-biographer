@@ -17,6 +17,12 @@ export type ParsedTelegramControlAction = {
   payload: string | null;
 };
 
+export type ParsedTelegramControlReply = {
+  candidateId: string;
+  action: TelegramControlAction;
+  payload: string | null;
+};
+
 export type CandidatePackageMessageInput = {
   candidateId: string;
   draftText: string;
@@ -139,17 +145,12 @@ export function parseTelegramControlUpdate(update: TelegramUpdate): ParsedTelegr
     return null;
   }
 
-  const candidateId = message.reply_to_message?.text
-    ? extractCandidateIdFromControlMessage(message.reply_to_message.text)
-    : null;
+  const parsedReply = parseTelegramControlReply({
+    text: message.text,
+    replyMessageText: message.reply_to_message?.text,
+  });
 
-  if (!candidateId) {
-    return null;
-  }
-
-  const command = mapCommand(message.text.trim());
-
-  if (!command) {
+  if (!parsedReply) {
     return null;
   }
 
@@ -158,6 +159,31 @@ export function parseTelegramControlUpdate(update: TelegramUpdate): ParsedTelegr
     messageId: String(message.message_id),
     chatId: String(message.chat.id),
     actorUserId: message.from ? String(message.from.id) : null,
+    candidateId: parsedReply.candidateId,
+    action: parsedReply.action,
+    payload: parsedReply.payload,
+  };
+}
+
+export function parseTelegramControlReply(input: {
+  text: string;
+  replyMessageText?: string | null | undefined;
+}): ParsedTelegramControlReply | null {
+  const candidateId = input.replyMessageText
+    ? extractCandidateIdFromControlMessage(input.replyMessageText)
+    : null;
+
+  if (!candidateId) {
+    return null;
+  }
+
+  const command = mapCommand(input.text.trim());
+
+  if (!command) {
+    return null;
+  }
+
+  return {
     candidateId,
     action: command.action,
     payload: command.payload,

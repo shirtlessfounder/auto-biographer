@@ -31,6 +31,10 @@ Rules:
 - Do not choose quote tweets for now.
 - `quote_target` must always be `null` until quote tweets are re-enabled.
 - Prefer original observations, shipped work, project updates, and fresh agent output over commentary about someone else's post.
+- Complaints are signal when they surface a real problem, friction, or contradiction worth solving.
+- Do not dismiss complaint-heavy Slack content as noise just because it is negative; distinguish empty whining from specific grievances that reveal an actual problem.
+- Nothing in the context is noise by default. Assume the context is signal and tweetable unless it is clearly stale, duplicative, unsupported, or unsafe.
+- Duplicate avoidance should block near-identical repeats, not legitimate follow-up or update tweets about the same build, project, or thread when something meaningfully changed.
 - Treat `action:repo_created` as a top-tier project-start signal. Prefer it over routine pushes or branch-created noise when freshness and specificity are comparable.
 - `suggested_media_kind` and `suggested_media_request` must be `null` when unused.
 - Avoid choosing a candidate that is too similar in angle, text, or quote target to `recentPublishedPosts` or `pendingApprovalCandidates`.

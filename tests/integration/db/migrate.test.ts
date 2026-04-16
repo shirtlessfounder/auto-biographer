@@ -87,7 +87,7 @@ async function createTestDatabase(): Promise<TestDatabase> {
     '-l',
     logFilePath,
     '-o',
-    `-h 127.0.0.1 -p ${String(port)}`,
+    `-h 127.0.0.1 -p ${String(port)} -k ${baseDirectory}`,
     '-w',
     'start',
   ]);
@@ -209,6 +209,7 @@ describe('runMigrations', () => {
 
     expect(result.rows.map((row) => row.table_name)).toEqual([
       'sp_artifacts',
+      'sp_candidate_control_messages',
       'sp_candidate_sources',
       'sp_events',
       'sp_post_candidates',
@@ -223,5 +224,27 @@ describe('runMigrations', () => {
         { column_name: 'telegram_message_id', data_type: 'bigint' },
       ]),
     );
+  });
+
+  it('records 0004 when schema objects already exist', async () => {
+    await runMigrations(database.pool, {
+      migrationsDirectory: path.join(process.cwd(), 'src/db/migrations'),
+    });
+    await database.pool.query(`
+      delete from schema_migrations
+      where version = '0004_candidate_control_messages.sql'
+    `);
+
+    const rerun = await runMigrations(database.pool, {
+      migrationsDirectory: path.join(process.cwd(), 'src/db/migrations'),
+    });
+    const recorded = await database.pool.query<{ version: string }>(`
+      select version
+      from schema_migrations
+      where version = '0004_candidate_control_messages.sql'
+    `);
+
+    expect(rerun).toEqual(['0004_candidate_control_messages.sql']);
+    expect(recorded.rows).toEqual([{ version: '0004_candidate_control_messages.sql' }]);
   });
 });

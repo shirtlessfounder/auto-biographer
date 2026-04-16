@@ -42,8 +42,8 @@ type CandidateRow = {
 };
 
 const ACTIVE_APPROVAL_STATUSES = ['pending_approval', 'reminded', 'held'] as const;
+const AUTOMATION_CANDIDATE_STATUSES = [...ACTIVE_APPROVAL_STATUSES, 'post_requested'] as const;
 const AUTO_POSTABLE_STATUSES = ['pending_approval', 'reminded'] as const;
-const REMINDER_LEAD_MINUTES = 5;
 
 function mapCandidateRow(row: CandidateRow): CandidateRecord {
   return {
@@ -65,10 +65,6 @@ function mapCandidateRow(row: CandidateRow): CandidateRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
-}
-
-function subtractMinutes(value: Date, minutes: number): Date {
-  return new Date(value.getTime() - minutes * 60 * 1000);
 }
 
 function isActiveApprovalStatus(status: string): boolean {
@@ -131,7 +127,7 @@ export async function listCandidatesForAutomation(db: Queryable): Promise<Candid
       where status = any($1::text[])
       order by id asc
     `,
-    [ACTIVE_APPROVAL_STATUSES],
+    [AUTOMATION_CANDIDATE_STATUSES],
   );
 
   return result.rows.map(mapCandidateRow);
@@ -154,14 +150,6 @@ export function getCandidateTimerEffect(input: {
     && input.candidate.deadlineAt.getTime() <= input.now.getTime()
   ) {
     return 'request_post';
-  }
-
-  if (
-    input.candidate.status === 'pending_approval'
-    && input.candidate.reminderSentAt === null
-    && subtractMinutes(input.candidate.deadlineAt, REMINDER_LEAD_MINUTES).getTime() <= input.now.getTime()
-  ) {
-    return 'send_reminder';
   }
 
   return null;

@@ -2,19 +2,17 @@ import { randomUUID } from 'node:crypto';
 
 import { createCandidatesRepository } from '../db/repositories/candidates-repository';
 import { createRuntimeStateRepository } from '../db/repositories/runtime-state-repository';
-import { createTelegramActionsRepository } from '../db/repositories/telegram-actions-repository';
+import { createCandidateControlMessagesRepository } from '../db/repositories/candidate-control-messages-repository';
 import type { Queryable } from '../db/pool';
 import type { XThreadLookupClient } from '../enrichment/x/client';
 import type { HermesExecutor } from '../hermes/run-hermes';
 import { publishCandidate } from '../publisher/publish-candidate';
 import type { publishToXViaScript } from '../publisher/x-command';
-import { createTelegramUpdatePoller } from '../telegram/poll-updates';
 import type { TelegramClient } from '../telegram/client';
 import { formatSkipNotificationMessage } from '../telegram/command-parser';
 import { buildRecentContextPacket } from './context-builder';
 import { draftSelectedCandidate, type DrafterRunner } from './draft-candidate';
 import {
-  applyCandidateAction,
   getCandidateTimerEffect,
   listCandidatesForAutomation,
   markDeliveryFailed,
@@ -363,6 +361,7 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
   const syncSources = input.syncSources ?? [];
   const candidatesRepository = createCandidatesRepository(input.db);
   const syncResult = await runSyncSources(syncSources);
+  const controlMessagesRepository = createCandidateControlMessagesRepository(input.db);
   let selected: Awaited<ReturnType<typeof selectCandidate>>;
 
   try {
@@ -475,6 +474,11 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
     await candidatesRepository.updateCandidate(drafted.candidate.id, {
       telegramMessageId: String(sentMessage.message_id),
     });
+    await controlMessagesRepository.recordControlMessage({
+      candidateId: drafted.candidate.id,
+      telegramMessageId: String(sentMessage.message_id),
+      messageKind: 'draft',
+    });
   } catch (error) {
     await markDeliveryFailed({
       db: input.db,
@@ -508,6 +512,7 @@ async function sendReminder(input: {
   now: () => Date;
 }): Promise<boolean> {
   const candidatesRepository = createCandidatesRepository(input.db);
+  const controlMessagesRepository = createCandidateControlMessagesRepository(input.db);
 
   try {
     const sentMessage = await input.telegramClient.sendCandidatePackage({
@@ -520,6 +525,11 @@ async function sendReminder(input: {
     });
     await candidatesRepository.updateCandidate(input.candidateId, {
       telegramMessageId: String(sentMessage.message_id),
+    });
+    await controlMessagesRepository.recordControlMessage({
+      candidateId: input.candidateId,
+      telegramMessageId: String(sentMessage.message_id),
+      messageKind: 'reminder',
     });
   } catch {
     return false;
@@ -561,7 +571,6 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
   const now = input.now ?? (() => new Date());
   const dryRun = input.dryRun ?? false;
   const runtimeStateRepository = createRuntimeStateRepository(input.db);
-  const telegramActionsRepository = createTelegramActionsRepository(input.db);
   const windows = parseWindowsJson(input.windowsJson);
   const finalizedSlotIds = await listFinalizedSlotIds(runtimeStateRepository);
   const dueSlots = findDueWindowSlots({
@@ -601,39 +610,6 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
       postRequestedCandidateIds,
       createdCandidateIds,
     };
-  }
-
-  const poller = createTelegramUpdatePoller({
-    client: input.telegramClient,
-    runtimeStateRepository,
-    telegramActionsRepository,
-    candidateMediaRepository: createCandidatesRepository(input.db),
-    controlChatId: input.controlChatId,
-    now,
-  });
-  const polled = await poller.pollUpdates();
-
-  for (const action of polled.actions) {
-    const actionResult = await applyCandidateAction({
-      db: input.db,
-      candidateId: action.candidateId,
-      action: action.action,
-      payload: action.payload,
-      now,
-    });
-
-    if (actionResult.candidate?.status === 'post_requested') {
-      await publishRequestedCandidate({
-        db: input.db,
-        telegramClient: input.telegramClient,
-        candidateId: actionResult.candidate.id,
-        postProfile: input.postProfile,
-        clawdTweetScript: input.clawdTweetScript,
-        now,
-        publishToX: input.publishToX,
-      });
-      postRequestedCandidateIds.push(actionResult.candidate.id);
-    }
   }
 
   for (const slot of dueSlots) {
@@ -705,6 +681,22 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
   const candidates = await listCandidatesForAutomation(input.db);
 
   for (const candidate of candidates) {
+    if (candidate.status === 'post_requested') {
+      if (input.postProfile && input.clawdTweetScript) {
+        await publishRequestedCandidate({
+          db: input.db,
+          telegramClient: input.telegramClient,
+          candidateId: candidate.id,
+          postProfile: input.postProfile,
+          clawdTweetScript: input.clawdTweetScript,
+          now,
+          publishToX: input.publishToX,
+        });
+        postRequestedCandidateIds.push(candidate.id);
+      }
+      continue;
+    }
+
     const effect = getCandidateTimerEffect({
       candidate,
       now: now(),
@@ -752,7 +744,7 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
 
   return {
     dryRun,
-    processedActionCount: polled.actions.length,
+    processedActionCount: 0,
     dueWindowSlotIds: dueSlots.map((slot) => slot.slotId),
     reminderCandidateIds,
     postRequestedCandidateIds,

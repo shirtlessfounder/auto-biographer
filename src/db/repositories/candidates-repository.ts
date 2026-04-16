@@ -1,5 +1,7 @@
 import type { Queryable } from '../pool';
 
+import { createCandidateControlMessagesRepository } from './candidate-control-messages-repository';
+
 export type CandidateRecord = {
   id: string;
   triggerType: string;
@@ -332,12 +334,21 @@ export function createCandidatesRepository(db: Queryable) {
         throw new Error('allowedStatuses must include at least one status');
       }
 
+      const matchedCandidate = await createCandidateControlMessagesRepository(db).findCandidateByTelegramMessageId({
+        telegramMessageId: input.telegramMessageId,
+        allowedStatuses: input.allowedStatuses,
+      });
+
+      if (!matchedCandidate) {
+        return null;
+      }
+
       const result = await db.query<CandidateRow>(
         `
           update sp_post_candidates
           set media_batch_json = $3,
               updated_at = now()
-          where telegram_message_id = $1
+          where id = $1
             and status = any($2::text[])
           returning
             id,
@@ -359,7 +370,7 @@ export function createCandidatesRepository(db: Queryable) {
             updated_at
         `,
         [
-          input.telegramMessageId,
+          matchedCandidate.candidateId,
           input.allowedStatuses,
           toJsonbValue(input.mediaBatchJson),
         ],

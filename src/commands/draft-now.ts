@@ -4,7 +4,7 @@ import { loadEnv } from '../config/env';
 import { createPool } from '../db/pool';
 import { createXClient } from '../enrichment/x/client';
 import { runOnDemandDraft, type SharedDraftPipelineInput } from '../orchestrator/tick';
-import { createTelegramClient } from '../telegram/client';
+import { createHermesBackedTelegramClient } from '../telegram/hermes-client';
 import { buildSyncSources } from './tick';
 
 export async function runDraftNow(
@@ -20,9 +20,10 @@ export async function runDraftNowCommand(argv: string[] = process.argv.slice(2))
 
   const env = loadEnv(process.env);
   const pool = createPool(env.databaseUrl);
-  const telegramClient = createTelegramClient({
+  const telegramClient = createHermesBackedTelegramClient({
     botToken: env.telegramControlBotToken,
     chatId: env.telegramControlChatId,
+    hermesAgentDir: env.hermesAgentDir,
   });
   const xLookupClient = createXClient({
     bearerToken: env.xBearerToken,

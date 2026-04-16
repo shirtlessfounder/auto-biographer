@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 
 import { runDraftNowCommand } from './commands/draft-now';
 import { runTickCommand } from './commands/tick';
+import { runControlIngestCommand } from './commands/control-ingest';
 import { loadEnv } from './config/env';
 import { runMigrations } from './db/migrate';
 import { createPool } from './db/pool';
@@ -37,7 +38,7 @@ function runCheckEnvCommand(): void {
 }
 
 function printUsage(): void {
-  process.stderr.write('Usage: pnpm cli -- <migrate|check-env|tick|draft-now>\n');
+  process.stderr.write('Usage: pnpm cli -- <migrate|check-env|tick|draft-now|control-ingest>\n');
 }
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
@@ -55,6 +56,9 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       return;
     case 'draft-now':
       await runDraftNowCommand(argv.slice(1));
+      return;
+    case 'control-ingest':
+      await runControlIngestCommand(argv.slice(1));
       return;
     default:
       printUsage();

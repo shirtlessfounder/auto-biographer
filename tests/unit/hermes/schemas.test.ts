@@ -121,6 +121,12 @@ describe('runHermes', () => {
     expect(prompt).toContain('repo_created');
     expect(prompt).toContain('top-tier');
     expect(prompt).toContain('quote_target');
+    expect(prompt).toContain('Complaints are signal');
+    expect(prompt).toContain('empty whining');
+    expect(prompt).toContain('Nothing in the context is noise by default');
+    expect(prompt).toContain('Assume the context is signal and tweetable');
+    expect(prompt).toContain('meaningfully changed');
+    expect(prompt).toContain('follow-up or update tweets');
   });
 
   it('accepts selector skip results without a caller-provided output kind', async () => {
@@ -180,6 +186,8 @@ describe('runHermes', () => {
     expect(prompt).toContain('repoLinkUrl');
     expect(prompt).toContain('2-post thread');
     expect(prompt).toContain('media_request');
+    expect(prompt).toContain('must include a concrete `media_request`');
+    expect(prompt).toContain('For original posts about shipped work');
   });
 
   it('rejects invalid json on stdout', async () => {
