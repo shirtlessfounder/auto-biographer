@@ -6,8 +6,11 @@ import { createTelegramActionsRepository } from '../db/repositories/telegram-act
 import type { Queryable } from '../db/pool';
 import type { XThreadLookupClient } from '../enrichment/x/client';
 import type { HermesExecutor } from '../hermes/run-hermes';
+import { publishCandidate } from '../publisher/publish-candidate';
+import type { publishToXViaOAuth } from '../publisher/x-poster';
 import { createTelegramUpdatePoller } from '../telegram/poll-updates';
 import type { TelegramClient } from '../telegram/client';
+import { formatSkipNotificationMessage } from '../telegram/command-parser';
 import { buildRecentContextPacket } from './context-builder';
 import { draftSelectedCandidate, type DrafterRunner } from './draft-candidate';
 import {
@@ -20,9 +23,12 @@ import {
 } from './state-machine';
 import { selectCandidate, type SelectorRunner } from './select-candidate';
 import {
+  buildWindowSlotId,
   findDueWindowSlots,
+  getOrCreateWindowTargetFraction,
   parseWindowsJson,
   type RandomFractionForSlot,
+  type WindowDefinition,
 } from './windows';
 
 export type SyncSource = {
@@ -41,17 +47,34 @@ type SharedDraftPipelineDependencies = {
   hermesExecutor?: HermesExecutor | undefined;
   xLookupClient?: XThreadLookupClient | undefined;
   dryRun?: boolean | undefined;
+  publishGraceMinutes?: number | undefined;
 };
 
 export type SharedDraftPipelineInput = SharedDraftPipelineDependencies & {
   triggerType: 'scheduled' | 'on_demand';
   deadlineAt?: Date | null | undefined;
+  slot?: {
+    slotId: string;
+    windowName: string;
+    scheduledFor: Date;
+    ownerId: string;
+    attemptCount: number;
+  };
 };
 
 export type RunTickInput = SharedDraftPipelineDependencies & {
   controlChatId: string;
   windowsJson: unknown[];
   randomFractionForSlot?: RandomFractionForSlot | undefined;
+  postProfile?: string | undefined;
+  oauthCredentials?: {
+    consumerKey: string;
+    consumerSecret: string;
+    accessToken: string;
+    accessTokenSecret: string;
+  } | undefined;
+  xApiBaseUrl?: string | undefined;
+  publishToX?: typeof publishToXViaOAuth | undefined;
 };
 
 export type RunTickResult = {
@@ -83,7 +106,12 @@ type SharedDraftPipelineResult =
     errorDetails: null;
   }
   | {
-    outcome: 'draft_ready' | 'selector_skipped' | 'drafter_skipped' | 'delivery_failed';
+    outcome: 'draft_ready';
+    candidateId: string;
+    errorDetails: string | null;
+  }
+  | {
+    outcome: 'selector_skipped';
     candidateId: string;
     errorDetails: string | null;
   }
@@ -96,6 +124,11 @@ type SharedDraftPipelineResult =
     outcome: 'drafter_failed';
     candidateId: string;
     errorDetails: string;
+  }
+  | {
+    outcome: 'delivery_failed';
+    candidateId: string;
+    errorDetails: string | null;
   };
 
 function addMinutes(value: Date, minutes: number): Date {
@@ -112,6 +145,30 @@ function formatError(error: unknown): string {
   }
 
   return String(error);
+}
+
+async function sendSkipNotification(input: {
+  telegramClient: TelegramClient;
+  stage: 'selector' | 'drafter';
+  triggerType: 'scheduled' | 'on_demand';
+  candidateId: string;
+  candidateType?: string | null | undefined;
+  reason?: string | null | undefined;
+}): Promise<void> {
+  try {
+    await input.telegramClient.sendMessage({
+      text: formatSkipNotificationMessage({
+        stage: input.stage,
+        triggerType: input.triggerType,
+        candidateId: input.candidateId,
+        candidateType: input.candidateType,
+        reason: input.reason,
+      }),
+      disableWebPagePreview: true,
+    });
+  } catch {
+    // Skip notifications are informational only.
+  }
 }
 
 function getWindowSlotStatus(stateJson: unknown): WindowSlotLifecycleStatus | null {
@@ -149,6 +206,25 @@ async function listFinalizedSlotIds(
       .filter((state) => isFinalizedWindowSlotState(state.stateJson))
       .map((state) => state.stateKey.slice(SLOT_STATE_KEY_PREFIX.length)),
   );
+}
+
+async function buildWindowFractionMap(input: {
+  runtimeStateRepository: ReturnType<typeof createRuntimeStateRepository>;
+  windows: readonly WindowDefinition[];
+  now: Date;
+}): Promise<Map<string, number>> {
+  const fractions = new Map<string, number>();
+
+  for (const window of input.windows) {
+    const slotId = buildWindowSlotId(window, input.now);
+    const fraction = await getOrCreateWindowTargetFraction(input.runtimeStateRepository, {
+      slotId,
+      window,
+    });
+    fractions.set(slotId, fraction);
+  }
+
+  return fractions;
 }
 
 function buildInProgressWindowSlotState(input: {
@@ -332,6 +408,31 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
   const now = input.now ?? (() => new Date());
   const syncSources = input.syncSources ?? [];
   const candidatesRepository = createCandidatesRepository(input.db);
+  const runtimeStateRepository = createRuntimeStateRepository(input.db);
+
+  const HEARTBEAT_INTERVAL_MS = 60 * 1000;
+  const stopRef = { stopped: false };
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+  if (input.slot) {
+    heartbeatTimer = setInterval(async () => {
+      if (stopRef.stopped) return;
+      try {
+        const stateKey = buildWindowSlotStateKey(input.slot.slotId);
+        await runtimeStateRepository.setState(stateKey, {
+          slotId: input.slot.slotId,
+          windowName: input.slot.windowName,
+          scheduledFor: input.slot.scheduledFor.toISOString(),
+          status: 'in_progress',
+          ownerId: input.slot.ownerId,
+          claimedAt: new Date().toISOString(),
+          attemptCount: input.slot.attemptCount,
+        });
+      } catch { /* best-effort */ }
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  try {
   const syncResult = await runSyncSources(syncSources);
   let selected: Awaited<ReturnType<typeof selectCandidate>>;
 
@@ -344,12 +445,14 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
       db: input.db,
       context,
       triggerType: input.triggerType,
+      fallbackOnSkip: input.triggerType === 'scheduled',
       runSelector: input.runSelector,
       hermesBin: input.hermesBin,
       hermesExecutor: input.hermesExecutor,
       xLookupClient: input.xLookupClient,
     });
   } catch (error) {
+    console.error(`[tick] selector error: ${formatError(error)}`);
     return {
       outcome: 'selector_failed',
       candidateId: null,
@@ -361,6 +464,15 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
     if (syncResult.degraded) {
       await candidatesRepository.updateCandidate(selected.candidate.id, { degraded: true });
     }
+
+    await sendSkipNotification({
+      telegramClient: input.telegramClient,
+      stage: 'selector',
+      triggerType: input.triggerType,
+      candidateId: selected.candidate.id,
+      candidateType: selected.candidate.candidateType,
+      reason: selected.candidate.errorDetails,
+    });
 
     return {
       outcome: 'selector_skipped',
@@ -383,6 +495,8 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
       runDrafter: input.runDrafter,
       hermesBin: input.hermesBin,
       hermesExecutor: input.hermesExecutor,
+      publishGraceMinutes: input.publishGraceMinutes,
+      now: input.now,
     });
   } catch (error) {
     const errorDetails = formatError(error);
@@ -401,25 +515,22 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
   }
 
   if (drafted.outcome !== 'ready') {
-    if (syncResult.degraded) {
-      await candidatesRepository.updateCandidate(drafted.candidate.id, { degraded: true });
-    }
-
-    return {
-      outcome: 'drafter_skipped',
-      candidateId: drafted.candidate.id,
-      errorDetails: drafted.candidate.errorDetails,
-    };
+    throw new Error(`Unexpected draft outcome: ${(drafted as { outcome: string }).outcome}`);
   }
 
   try {
-    await input.telegramClient.sendCandidatePackage({
+    const sentMessage = await input.telegramClient.sendCandidatePackage({
       candidateId: drafted.package.candidateId,
       candidateType: drafted.package.candidateType,
+      deliveryKind: drafted.package.deliveryKind,
       deadlineAt: drafted.package.deadlineAt,
       draftText: drafted.package.draftText,
+      threadReplyText: drafted.package.threadReplyText,
       mediaRequest: drafted.package.mediaRequest,
       quoteTargetUrl: drafted.package.quoteTargetUrl,
+    });
+    await candidatesRepository.updateCandidate(drafted.candidate.id, {
+      telegramMessageId: String(sentMessage.message_id),
     });
   } catch (error) {
     await markDeliveryFailed({
@@ -440,6 +551,10 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
     candidateId: drafted.candidate.id,
     errorDetails: null,
   };
+  } finally {
+    stopRef.stopped = true;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+  }
 }
 
 async function sendReminder(input: {
@@ -453,14 +568,19 @@ async function sendReminder(input: {
   quoteTargetUrl: string | null;
   now: () => Date;
 }): Promise<boolean> {
+  const candidatesRepository = createCandidatesRepository(input.db);
+
   try {
-    await input.telegramClient.sendCandidatePackage({
+    const sentMessage = await input.telegramClient.sendCandidatePackage({
       candidateId: input.candidateId,
       candidateType: input.candidateType,
       deadlineAt: input.deadlineAt,
       draftText: input.draftText ?? '',
       mediaRequest: input.mediaRequest,
       quoteTargetUrl: input.quoteTargetUrl,
+    });
+    await candidatesRepository.updateCandidate(input.candidateId, {
+      telegramMessageId: String(sentMessage.message_id),
     });
   } catch {
     return false;
@@ -474,6 +594,37 @@ async function sendReminder(input: {
   return true;
 }
 
+async function publishRequestedCandidate(input: {
+  db: Queryable;
+  telegramClient: TelegramClient;
+  candidateId: string;
+  postProfile?: string | undefined;
+  oauthCredentials?: {
+    consumerKey: string;
+    consumerSecret: string;
+    accessToken: string;
+    accessTokenSecret: string;
+  } | undefined;
+  xApiBaseUrl?: string | undefined;
+  now: () => Date;
+  publishToX?: typeof publishToXViaOAuth | undefined;
+}): Promise<void> {
+  if (!input.postProfile || !input.oauthCredentials) {
+    throw new Error('postProfile and oauthCredentials are required when publishing');
+  }
+
+  await publishCandidate({
+    db: input.db,
+    telegramClient: input.telegramClient,
+    candidateId: input.candidateId,
+    postProfile: input.postProfile,
+    oauthCredentials: input.oauthCredentials,
+    xApiBaseUrl: input.xApiBaseUrl,
+    now: input.now,
+    publishToX: input.publishToX,
+  });
+}
+
 export async function runTick(input: RunTickInput): Promise<RunTickResult> {
   const now = input.now ?? (() => new Date());
   const dryRun = input.dryRun ?? false;
@@ -481,11 +632,18 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
   const telegramActionsRepository = createTelegramActionsRepository(input.db);
   const windows = parseWindowsJson(input.windowsJson);
   const finalizedSlotIds = await listFinalizedSlotIds(runtimeStateRepository);
+  const fractionsByslotId = await buildWindowFractionMap({
+    runtimeStateRepository,
+    windows,
+    now: now(),
+  });
+  const randomFractionForSlot: RandomFractionForSlot =
+    input.randomFractionForSlot ?? ((slotId) => fractionsByslotId.get(slotId) ?? 0);
   const dueSlots = findDueWindowSlots({
     windows,
     now: now(),
     claimedSlotIds: finalizedSlotIds,
-    randomFractionForSlot: input.randomFractionForSlot,
+    randomFractionForSlot,
   });
   const reminderCandidateIds: string[] = [];
   const postRequestedCandidateIds: string[] = [];
@@ -524,34 +682,52 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
     client: input.telegramClient,
     runtimeStateRepository,
     telegramActionsRepository,
+    candidateMediaRepository: createCandidatesRepository(input.db),
     controlChatId: input.controlChatId,
+    now,
   });
   const polled = await poller.pollUpdates();
 
   for (const action of polled.actions) {
-    await applyCandidateAction({
+    const actionResult = await applyCandidateAction({
       db: input.db,
       candidateId: action.candidateId,
       action: action.action,
       payload: action.payload,
       now,
     });
+
+    if (actionResult.candidate?.status === 'post_requested') {
+      await publishRequestedCandidate({
+        db: input.db,
+        telegramClient: input.telegramClient,
+        candidateId: actionResult.candidate.id,
+        postProfile: input.postProfile,
+        oauthCredentials: input.oauthCredentials,
+        xApiBaseUrl: input.xApiBaseUrl,
+        now,
+        publishToX: input.publishToX,
+      });
+      postRequestedCandidateIds.push(actionResult.candidate.id);
+    }
   }
 
   for (const slot of dueSlots) {
-    const claimedSlot = await claimWindowSlot({
+    console.error(`[tick] processing slot: ${slot.slotId}`);
+    const claim = await claimWindowSlot({
       runtimeStateRepository,
       slot,
       now: now(),
       ownerId: tickRunId,
     });
 
-    if (!claimedSlot) {
+    if (!claim) {
+      console.error(`[tick] slot=${slot.slotId} could not be claimed — skipping`);
       continue;
     }
 
-    const nextAttemptCount = claimedSlot.attemptCount;
-
+    const { attemptCount } = claim;
+    console.error(`[tick] slot=${slot.slotId} claimed (attempt ${attemptCount}) — running pipeline`);
     const result = await runSharedDraftPipeline({
       db: input.db,
       telegramClient: input.telegramClient,
@@ -564,7 +740,16 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
       hermesBin: input.hermesBin,
       hermesExecutor: input.hermesExecutor,
       xLookupClient: input.xLookupClient,
+      slot: {
+        slotId: slot.slotId,
+        windowName: slot.windowName,
+        scheduledFor: slot.scheduledFor,
+        ownerId: tickRunId,
+        attemptCount,
+      },
     });
+
+    console.error(`[tick] slot=${slot.slotId} result.outcome=${result.outcome} candidateId=${result.candidateId}`);
 
     if (result.candidateId !== null) {
       createdCandidateIds.push(result.candidateId);
@@ -576,12 +761,12 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
       continue;
     }
 
-    if (result.outcome === 'drafter_failed' && nextAttemptCount < MAX_DRAFTER_ATTEMPTS) {
+    if (result.outcome === 'drafter_failed' && attemptCount < MAX_DRAFTER_ATTEMPTS) {
       await rememberRetryableWindowSlotFailure({
         runtimeStateRepository,
         slot,
         now: processedAt,
-        attemptCount: nextAttemptCount,
+        attemptCount,
         ownerId: tickRunId,
         candidateId: result.candidateId,
         errorDetails: result.errorDetails,
@@ -597,7 +782,7 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
       slot,
       now: processedAt,
       outcome: finalizedOutcome,
-      attemptCount: nextAttemptCount,
+      attemptCount,
       ownerId: tickRunId,
       candidateId: result.candidateId,
       errorDetails: result.errorDetails,
@@ -638,6 +823,16 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
       });
 
       if (transitioned) {
+        await publishRequestedCandidate({
+          db: input.db,
+          telegramClient: input.telegramClient,
+          candidateId: transitioned.id,
+          postProfile: input.postProfile,
+          oauthCredentials: input.oauthCredentials,
+          xApiBaseUrl: input.xApiBaseUrl,
+          now,
+          publishToX: input.publishToX,
+        });
         postRequestedCandidateIds.push(candidate.id);
       }
     }

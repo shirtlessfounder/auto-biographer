@@ -1,10 +1,24 @@
 import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { readFileSync } from 'node:fs';
+import { parse } from 'dotenv';
 
+// Load .env for vars NOT already set in the process environment.
+// This prevents .env from overwriting platform-injected secrets (DB URL, Telegram token, etc.).
+const envPath = path.resolve(fileURLToPath(import.meta.url), '../../.env');
+const parsed = parse(readFileSync(envPath));
+for (const [key, value] of Object.entries(parsed)) {
+  if (process.env[key] === undefined) {
+    process.env[key] = value;
+  }
+}
+
+import { runApplyCommand } from './commands/apply-command';
 import { runDraftNowCommand } from './commands/draft-now';
 import { runTickCommand } from './commands/tick';
 import { loadEnv } from './config/env';
 import { runMigrations } from './db/migrate';
-import { createPool } from './db/pool';
+import { getPool } from './db/mcp-client';
 
 async function runMigrateCommand(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
@@ -13,7 +27,7 @@ async function runMigrateCommand(): Promise<void> {
     throw new Error('DATABASE_URL is required');
   }
 
-  const pool = createPool(databaseUrl);
+  const pool = await getPool();
 
   try {
     const appliedMigrations = await runMigrations(pool);
@@ -37,7 +51,9 @@ function runCheckEnvCommand(): void {
 }
 
 function printUsage(): void {
-  process.stderr.write('Usage: pnpm cli -- <migrate|check-env|tick|draft-now>\n');
+  process.stderr.write(
+    'Usage: pnpm cli -- <migrate|check-env|tick|draft-now|apply-command>\n',
+  );
 }
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
@@ -55,6 +71,9 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       return;
     case 'draft-now':
       await runDraftNowCommand(argv.slice(1));
+      return;
+    case 'apply-command':
+      await runApplyCommand(argv.slice(1));
       return;
     default:
       printUsage();

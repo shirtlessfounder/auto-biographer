@@ -16,11 +16,22 @@ export type TelegramChat = {
   type: string;
 };
 
+export type TelegramPhotoSize = {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number | undefined;
+};
+
 export type TelegramMessage = {
   message_id: number;
   chat: TelegramChat;
   date?: number | undefined;
   text?: string | undefined;
+  caption?: string | undefined;
+  media_group_id?: string | undefined;
+  photo?: TelegramPhotoSize[] | undefined;
   from?: TelegramUser | undefined;
   reply_to_message?:
     | {
@@ -43,9 +54,22 @@ export type GetTelegramUpdatesInput = {
 
 export type SendCandidatePackageInput = CandidatePackageMessageInput;
 
+export type SendTelegramMessageInput = {
+  text: string;
+  disableWebPagePreview?: boolean | undefined;
+};
+
+export type TelegramFile = {
+  fileId: string;
+  filePath: string;
+  downloadUrl: string;
+};
+
 export type TelegramClient = {
   getUpdates(input?: GetTelegramUpdatesInput | undefined): Promise<TelegramUpdate[]>;
+  sendMessage(input: SendTelegramMessageInput): Promise<TelegramMessage>;
   sendCandidatePackage(input: SendCandidatePackageInput): Promise<TelegramMessage>;
+  getFile(fileId: string): Promise<TelegramFile>;
 };
 
 type FetchLike = typeof fetch;
@@ -73,11 +97,22 @@ const TelegramReplyMessageSchema = z.object({
   text: z.string().optional(),
 });
 
+const TelegramPhotoSizeSchema = z.object({
+  file_id: z.string(),
+  file_unique_id: z.string(),
+  width: z.number().int(),
+  height: z.number().int(),
+  file_size: z.number().int().optional(),
+});
+
 const TelegramMessageSchema = z.object({
   message_id: z.number().int(),
   chat: TelegramChatSchema,
   date: z.number().int().optional(),
   text: z.string().optional(),
+  caption: z.string().optional(),
+  media_group_id: z.string().optional(),
+  photo: z.array(TelegramPhotoSizeSchema).optional(),
   from: TelegramUserSchema.optional(),
   reply_to_message: TelegramReplyMessageSchema.optional(),
 });
@@ -85,6 +120,11 @@ const TelegramMessageSchema = z.object({
 const TelegramUpdateSchema = z.object({
   update_id: z.number().int(),
   message: TelegramMessageSchema.optional(),
+});
+
+const TelegramFileSchema = z.object({
+  file_id: z.string(),
+  file_path: z.string(),
 });
 
 const TelegramApiErrorSchema = z.object({
@@ -102,8 +142,14 @@ function buildSuccessSchema<Result>(resultSchema: z.ZodType<Result>) {
 
 function buildTelegramApiUrl(apiBaseUrl: string, botToken: string, method: string): string {
   const normalizedBaseUrl = apiBaseUrl.endsWith('/') ? apiBaseUrl.slice(0, -1) : apiBaseUrl;
+  // Proxy injects bot token server-side — URL pattern is {baseUrl}/bot/{method}
+  return `${normalizedBaseUrl}/bot/${method}`;
+}
 
-  return `${normalizedBaseUrl}/bot${botToken}/${method}`;
+function buildTelegramFileUrl(apiBaseUrl: string, botToken: string, filePath: string): string {
+  const normalizedBaseUrl = apiBaseUrl.endsWith('/') ? apiBaseUrl.slice(0, -1) : apiBaseUrl;
+  // Proxy injects bot token server-side — URL pattern is {baseUrl}/file/{filePath}
+  return `${normalizedBaseUrl}/file/${filePath}`;
 }
 
 async function requestTelegramApi<Result>(input: {
@@ -177,7 +223,7 @@ export function createTelegramClient(input: CreateTelegramClientInput): Telegram
       });
     },
 
-    async sendCandidatePackage(candidatePackage: SendCandidatePackageInput): Promise<TelegramMessage> {
+    async sendMessage(message: SendTelegramMessageInput): Promise<TelegramMessage> {
       return requestTelegramApi({
         apiBaseUrl,
         botToken: input.botToken,
@@ -185,11 +231,37 @@ export function createTelegramClient(input: CreateTelegramClientInput): Telegram
         fetchFn,
         body: {
           chat_id: input.chatId,
-          text: formatCandidatePackageMessage(candidatePackage),
-          disable_web_page_preview: true,
+          text: message.text,
+          disable_web_page_preview: message.disableWebPagePreview ?? false,
         },
         resultSchema: TelegramMessageSchema,
       });
+    },
+
+    async sendCandidatePackage(candidatePackage: SendCandidatePackageInput): Promise<TelegramMessage> {
+      return this.sendMessage({
+        text: formatCandidatePackageMessage(candidatePackage),
+        disableWebPagePreview: true,
+      });
+    },
+
+    async getFile(fileId: string): Promise<TelegramFile> {
+      const result = await requestTelegramApi({
+        apiBaseUrl,
+        botToken: input.botToken,
+        method: 'getFile',
+        fetchFn,
+        body: {
+          file_id: fileId,
+        },
+        resultSchema: TelegramFileSchema,
+      });
+
+      return {
+        fileId: result.file_id,
+        filePath: result.file_path,
+        downloadUrl: buildTelegramFileUrl(apiBaseUrl, input.botToken, result.file_path),
+      };
     },
   };
 }

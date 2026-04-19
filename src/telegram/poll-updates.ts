@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { collectTelegramPhotoReplyBatches } from './photo-batches';
 import { parseTelegramControlUpdate, type ParsedTelegramControlAction } from './command-parser';
 import type { TelegramClient, TelegramUpdate } from './client';
 
@@ -26,11 +27,21 @@ type TelegramActionsRepository = {
   }): Promise<unknown>;
 };
 
+type CandidateMediaRepository = {
+  replaceMediaBatchByTelegramMessageId(input: {
+    telegramMessageId: string;
+    allowedStatuses: string[];
+    mediaBatchJson: unknown;
+  }): Promise<unknown>;
+};
+
 type CreateTelegramUpdatePollerInput = {
   client: TelegramClient;
   runtimeStateRepository: RuntimeStateRepository;
   telegramActionsRepository: TelegramActionsRepository;
+  candidateMediaRepository: CandidateMediaRepository;
   controlChatId: string;
+  now?: (() => Date) | undefined;
 };
 
 type PollUpdatesInput = {
@@ -57,8 +68,22 @@ function readStoredUpdateOffset(stateJson: unknown): number {
 }
 
 export function createTelegramUpdatePoller(input: CreateTelegramUpdatePollerInput) {
+  const now = input.now ?? (() => new Date());
+
   return {
     async pollUpdates(request: PollUpdatesInput = {}): Promise<PollTelegramUpdatesResult> {
+      // If the bot token is not configured (e.g. platform hasn't injected it in this env),
+      // skip polling and return empty results so the tick can still run.
+      const botToken = (input.client as { botToken?: string }).botToken;
+      if (!botToken) {
+        return {
+          processedUpdateCount: 0,
+          storedActionCount: 0,
+          nextUpdateOffset: null,
+          actions: [],
+        };
+      }
+
       const storedState = await input.runtimeStateRepository.getState(
         TELEGRAM_UPDATES_OFFSET_STATE_KEY,
       );
@@ -71,6 +96,7 @@ export function createTelegramUpdatePoller(input: CreateTelegramUpdatePollerInpu
         }),
       );
       const actions: ParsedTelegramControlAction[] = [];
+      const controlChatUpdates: TelegramUpdate[] = [];
       let nextUpdateOffset: number | null = offset ?? null;
 
       for (const update of updates) {
@@ -79,6 +105,8 @@ export function createTelegramUpdatePoller(input: CreateTelegramUpdatePollerInpu
         if (String(update.message?.chat.id ?? '') !== input.controlChatId) {
           continue;
         }
+
+        controlChatUpdates.push(update);
 
         const parsedAction = parseTelegramControlUpdate(update);
 
@@ -93,6 +121,20 @@ export function createTelegramUpdatePoller(input: CreateTelegramUpdatePollerInpu
           payload: parsedAction.payload,
         });
         actions.push(parsedAction);
+      }
+
+      for (const batch of collectTelegramPhotoReplyBatches(controlChatUpdates)) {
+        await input.candidateMediaRepository.replaceMediaBatchByTelegramMessageId({
+          telegramMessageId: String(batch.replyMessageId),
+          allowedStatuses: ['pending_approval', 'reminded', 'held'],
+          mediaBatchJson: {
+            kind: 'telegram_photo_batch',
+            replyMessageId: batch.replyMessageId,
+            mediaGroupId: batch.mediaGroupId,
+            capturedAt: now().toISOString(),
+            photos: batch.photos,
+          },
+        });
       }
 
       if (nextUpdateOffset !== null && updates.length > 0) {

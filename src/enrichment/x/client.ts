@@ -131,7 +131,7 @@ type FetchImplementation = typeof fetch;
 
 type XClientOptions = {
   baseUrl?: string;
-  bearerToken: string;
+  bearerToken?: string;
   fetchImpl?: FetchImplementation;
   maxThreadDepth?: number;
   now?: () => Date;
@@ -225,14 +225,12 @@ function mergeLookupResponse(
 
 async function fetchAndCachePost(
   tweetId: string,
-  options: Required<Pick<XClientOptions, 'baseUrl' | 'bearerToken' | 'fetchImpl'>>,
+  options: Required<Pick<XClientOptions, 'baseUrl' | 'fetchImpl'>> & { bearerToken?: string },
   postCache: Map<string, XPost>,
   rawById: Record<string, unknown>,
 ): Promise<XFetchResult> {
   const response = await options.fetchImpl(buildLookupUrl(options.baseUrl, tweetId), {
-    headers: {
-      Authorization: `Bearer ${options.bearerToken}`,
-    },
+    headers: {},
   });
 
   if (!response.ok) {

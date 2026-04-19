@@ -273,3 +273,63 @@ export function findDueWindowSlots(input: {
     .filter((slot) => slot.scheduledFor.getTime() <= input.now.getTime())
     .sort((left, right) => left.scheduledFor.getTime() - right.scheduledFor.getTime());
 }
+
+type WindowTargetState = { fraction: number; offsetMinutes: number; createdAt: string };
+
+type RuntimeStateLike = {
+  insertStateIfAbsent(
+    stateKey: string,
+    stateJson: unknown,
+  ): Promise<unknown | null>;
+  getState(stateKey: string): Promise<{ stateJson: unknown } | null>;
+};
+
+export function buildWindowTargetStateKey(slotId: string): string {
+  return `window_target:${slotId}`;
+}
+
+/**
+ * Returns a per-day random fraction in [0, 1) for the given slot. Stored in
+ * sp_runtime_state under `window_target:<slotId>` so the same offset is reused
+ * across ticks within a day. Uses crypto.randomInt for real entropy (the hash
+ * fallback was near-constant across consecutive days).
+ */
+export async function getOrCreateWindowTargetFraction(
+  runtimeStateRepository: RuntimeStateLike,
+  input: { slotId: string; window: WindowDefinition },
+): Promise<number> {
+  const stateKey = buildWindowTargetStateKey(input.slotId);
+  const existing = await runtimeStateRepository.getState(stateKey);
+
+  if (existing && typeof existing.stateJson === 'object' && existing.stateJson !== null) {
+    const state = existing.stateJson as Partial<WindowTargetState>;
+    if (typeof state.fraction === 'number' && state.fraction >= 0 && state.fraction < 1) {
+      return state.fraction;
+    }
+  }
+
+  const { randomInt } = await import('node:crypto');
+  const spanMinutes = Math.max(1, input.window.endMinutes - input.window.startMinutes);
+  const offsetMinutes = randomInt(0, spanMinutes);
+  const fraction = offsetMinutes / spanMinutes;
+  const newState: WindowTargetState = {
+    fraction,
+    offsetMinutes,
+    createdAt: new Date().toISOString(),
+  };
+
+  const inserted = await runtimeStateRepository.insertStateIfAbsent(stateKey, newState);
+
+  if (inserted === null) {
+    // Lost race with another ticker — read the winning value.
+    const winner = await runtimeStateRepository.getState(stateKey);
+    if (winner && typeof winner.stateJson === 'object' && winner.stateJson !== null) {
+      const state = winner.stateJson as Partial<WindowTargetState>;
+      if (typeof state.fraction === 'number' && state.fraction >= 0 && state.fraction < 1) {
+        return state.fraction;
+      }
+    }
+  }
+
+  return fraction;
+}

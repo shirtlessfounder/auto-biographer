@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 
 import { loadEnv } from '../config/env';
-import { createPool } from '../db/pool';
+import { getPool } from '../db/mcp-client';
 import { createXClient } from '../enrichment/x/client';
 import { runOnDemandDraft, type SharedDraftPipelineInput } from '../orchestrator/tick';
 import { createTelegramClient } from '../telegram/client';
@@ -19,10 +19,11 @@ export async function runDraftNowCommand(argv: string[] = process.argv.slice(2))
   }
 
   const env = loadEnv(process.env);
-  const pool = createPool(env.databaseUrl);
+  const pool = await getPool();
   const telegramClient = createTelegramClient({
     botToken: env.telegramControlBotToken,
     chatId: env.telegramControlChatId,
+    apiBaseUrl: env.telegramApiBaseUrl,
   });
   const xLookupClient = createXClient({
     bearerToken: env.xBearerToken,

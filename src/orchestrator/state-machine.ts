@@ -11,6 +11,7 @@ export type CandidateStatus =
   | 'held'
   | 'skipped'
   | 'post_requested'
+  | 'published'
   | 'delivery_failed';
 
 export type CandidateTimerEffect = 'send_reminder' | 'request_post' | null;
@@ -32,8 +33,11 @@ type CandidateRow = {
   final_post_text: string | null;
   quote_target_url: string | null;
   media_request: string | null;
+  telegram_message_id: string | null;
+  media_batch_json: unknown;
   degraded: boolean;
   error_details: string | null;
+  publish_at: Date | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -48,17 +52,20 @@ function mapCandidateRow(row: CandidateRow): CandidateRecord {
     triggerType: row.trigger_type,
     candidateType: row.candidate_type,
     status: row.status,
-    deadlineAt: row.deadline_at,
-    reminderSentAt: row.reminder_sent_at,
+    deadlineAt: row.deadline_at ? new Date(row.deadline_at as unknown as string) : null,
+    reminderSentAt: row.reminder_sent_at ? new Date(row.reminder_sent_at as unknown as string) : null,
     selectorOutputJson: row.selector_output_json,
     drafterOutputJson: row.drafter_output_json,
     finalPostText: row.final_post_text,
     quoteTargetUrl: row.quote_target_url,
     mediaRequest: row.media_request,
+    telegramMessageId: row.telegram_message_id,
+    mediaBatchJson: row.media_batch_json,
     degraded: row.degraded,
     errorDetails: row.error_details,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    publishAt: row.publish_at ? new Date(row.publish_at as unknown as string) : null,
+    createdAt: new Date(row.created_at as unknown as string),
+    updatedAt: new Date(row.updated_at as unknown as string),
   };
 }
 
@@ -85,8 +92,11 @@ export async function getCandidateById(db: Queryable, candidateId: string): Prom
         final_post_text,
         quote_target_url,
         media_request,
+        telegram_message_id,
+        media_batch_json,
         degraded,
         error_details,
+        publish_at,
         created_at,
         updated_at
       from sp_post_candidates
@@ -114,15 +124,18 @@ export async function listCandidatesForAutomation(db: Queryable): Promise<Candid
         final_post_text,
         quote_target_url,
         media_request,
+        telegram_message_id,
+        media_batch_json,
         degraded,
         error_details,
+        publish_at,
         created_at,
         updated_at
       from sp_post_candidates
-      where status = any($1::text[])
+      where status IN ($1, $2, $3)
       order by id asc
     `,
-    [ACTIVE_APPROVAL_STATUSES],
+    ['pending_approval', 'reminded', 'held'],
   );
 
   return result.rows.map(mapCandidateRow);
@@ -132,6 +145,16 @@ export function getCandidateTimerEffect(input: {
   candidate: CandidateRecord;
   now: Date;
 }): CandidateTimerEffect {
+  if (
+    input.candidate.publishAt !== null
+    && input.candidate.publishAt.getTime() <= input.now.getTime()
+    && AUTO_POSTABLE_STATUSES.includes(
+      input.candidate.status as (typeof AUTO_POSTABLE_STATUSES)[number],
+    )
+  ) {
+    return 'request_post';
+  }
+
   if (input.candidate.triggerType !== 'scheduled' || input.candidate.deadlineAt === null) {
     return null;
   }
@@ -204,8 +227,11 @@ export async function applyCandidateAction(input: {
   action: TelegramControlAction;
   payload?: string | null | undefined;
   now?: (() => Date) | undefined;
+  publishGraceMinutes?: number | undefined;
 }): Promise<CandidateActionResult> {
   const candidatesRepository = createCandidatesRepository(input.db);
+  const nowFn = input.now ?? (() => new Date());
+  const graceMinutes = input.publishGraceMinutes ?? 10;
 
   switch (input.action) {
     case 'skip': {
@@ -214,6 +240,7 @@ export async function applyCandidateAction(input: {
         fromStatuses: [...ACTIVE_APPROVAL_STATUSES, 'post_requested', 'delivery_failed'],
         toStatus: 'skipped',
         errorDetails: input.now ? `Skipped at ${input.now().toISOString()}` : null,
+        publishAt: null,
       });
 
       return {
@@ -228,6 +255,7 @@ export async function applyCandidateAction(input: {
         fromStatuses: ['pending_approval', 'reminded', 'post_requested'],
         toStatus: 'held',
         errorDetails: null,
+        publishAt: null,
       });
 
       return {
@@ -268,6 +296,7 @@ export async function applyCandidateAction(input: {
       const candidate = await candidatesRepository.updateCandidate(input.candidateId, {
         finalPostText: input.payload.trim(),
         errorDetails: null,
+        publishAt: new Date(nowFn().getTime() + graceMinutes * 60 * 1000),
       });
 
       return {

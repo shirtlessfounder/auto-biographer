@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
-
+import type { Queryable } from '../db/pool';
 import { createEventsRepository, type EventRecord } from '../db/repositories/events-repository';
 import type {
   NormalizedArtifactInput,
@@ -19,7 +19,7 @@ type ArtifactRow = {
   created_at: Date;
 };
 
-type UpsertEventsDb = Pool | PoolClient;
+type UpsertEventsDb = Pool | Queryable;
 
 export interface UpsertedNormalizedEvent {
   event: EventRecord;
@@ -104,7 +104,7 @@ function mapArtifactRow(row: ArtifactRow): PersistedArtifactRecord {
 }
 
 async function upsertArtifact(
-  client: PoolClient,
+  client: Queryable,
   eventId: string,
   artifact: NormalizedArtifactInput,
 ): Promise<PersistedArtifactRecord> {
@@ -154,7 +154,7 @@ async function upsertArtifact(
 
 async function withTransaction<T>(
   db: UpsertEventsDb,
-  callback: (client: PoolClient) => Promise<T>,
+  callback: (client: Queryable) => Promise<T>,
 ): Promise<T> {
   if (isPool(db)) {
     const client = await db.connect();
@@ -184,8 +184,8 @@ async function withTransaction<T>(
   }
 }
 
-function isPool(db: UpsertEventsDb): db is Pool {
-  return 'connect' in db;
+function isPool(db: Pool | PoolClient | Queryable): db is Pool {
+  return 'totalCount' in db;
 }
 
 export async function upsertEvents(

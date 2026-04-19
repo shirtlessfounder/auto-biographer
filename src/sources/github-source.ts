@@ -1,14 +1,15 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import type { Pool, PoolClient } from 'pg';
+import type { PoolClient } from 'pg';
+import type { Queryable } from '../db/pool';
 
 import { upsertEvents as defaultUpsertEvents, type UpsertedNormalizedEvent } from '../normalization/upsert-events';
 import type { NormalizedEventInput } from '../normalization/types';
 
 const execFileAsync = promisify(execFile);
 
-type GitHubSourceDb = Pool | PoolClient;
+type SourceDb = PoolClient | Queryable;
 
 type GitHubSource = {
   sync(): Promise<UpsertedNormalizedEvent[]>;
@@ -22,9 +23,11 @@ type ExecutorResult = {
 type GitHubSourceOptions = {
   githubUsername: string;
   activityLimit?: number;
+  lookbackHours?: number;
+  now?: () => Date;
   executor?: (command: string, args: string[]) => Promise<ExecutorResult>;
   upsertEvents?: (
-    db: GitHubSourceDb,
+    db: SourceDb,
     events: readonly NormalizedEventInput[],
   ) => Promise<UpsertedNormalizedEvent[]>;
 };
@@ -36,6 +39,16 @@ type GitHubActivityRecord = Record<string, unknown> & {
   actor?: unknown;
   repo?: unknown;
   payload?: unknown;
+};
+
+type GitHubRepoRecord = Record<string, unknown> & {
+  name?: unknown;
+  full_name?: unknown;
+  html_url?: unknown;
+  created_at?: unknown;
+  description?: unknown;
+  private?: unknown;
+  owner?: unknown;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -100,6 +113,10 @@ function pluralize(count: number, singular: string, plural: string): string {
   return count === 1 ? singular : plural;
 }
 
+function subtractHours(value: Date, hours: number): Date {
+  return new Date(value.getTime() - hours * 60 * 60 * 1000);
+}
+
 function getRepoName(event: GitHubActivityRecord): string | null {
   if (!isRecord(event.repo)) {
     return null;
@@ -129,6 +146,40 @@ function getEventId(event: GitHubActivityRecord): string | null {
 
 function buildRepoUrl(repoName: string): string {
   return `https://github.com/${repoName}`;
+}
+
+function buildBranchUrl(repoName: string, branchName: string): string {
+  return `${buildRepoUrl(repoName)}/tree/${encodeURIComponent(branchName)}`;
+}
+
+function getRepoNameFromRepoRecord(repo: GitHubRepoRecord): string | null {
+  const fullName = getString(repo.full_name);
+
+  if (fullName !== null) {
+    return fullName;
+  }
+
+  const repoName = getString(repo.name);
+
+  if (repoName === null || !isRecord(repo.owner)) {
+    return null;
+  }
+
+  const ownerLogin = getString(repo.owner.login);
+
+  if (ownerLogin === null) {
+    return null;
+  }
+
+  return `${ownerLogin}/${repoName}`;
+}
+
+function buildRepoCreatedSummary(repoName: string, description: string | null): string {
+  if (description === null) {
+    return `Created repository ${repoName}`;
+  }
+
+  return `Created repository ${repoName}: ${description}`;
 }
 
 function normalizePushEvent(
@@ -304,6 +355,123 @@ function normalizeWatchEvent(
   };
 }
 
+function normalizeCreateEvent(
+  event: GitHubActivityRecord,
+  repoName: string,
+  occurredAt: Date,
+  author: string,
+): NormalizedEventInput | null {
+  if (!isRecord(event.payload)) {
+    return null;
+  }
+
+  const sourceId = getEventId(event);
+  const refType = getString(event.payload.ref_type);
+  const ref = getString(event.payload.ref);
+
+  if (sourceId === null || refType === null) {
+    return null;
+  }
+
+  if (refType === 'repository') {
+    const url = buildRepoUrl(repoName);
+    const summary = `Created repository ${repoName}`;
+
+    return {
+      source: 'github',
+      sourceId,
+      occurredAt,
+      author,
+      urlOrLocator: url,
+      title: `${repoName} repo created`,
+      summary,
+      rawText: summary,
+      tags: [`repo:${repoName}`, 'action:repo_created'],
+      rawPayload: {
+        repo: repoName,
+        action: 'repo_created',
+        url,
+        summary,
+        eventType: event.type,
+        event,
+      },
+    };
+  }
+
+  if (refType === 'branch' && ref !== null) {
+    const url = buildBranchUrl(repoName, ref);
+    const summary = `Created branch ${ref} in ${repoName}`;
+
+    return {
+      source: 'github',
+      sourceId,
+      occurredAt,
+      author,
+      urlOrLocator: url,
+      title: `${repoName} branch created`,
+      summary,
+      rawText: summary,
+      tags: [`repo:${repoName}`, 'action:branch_created', `branch:${ref}`],
+      rawPayload: {
+        repo: repoName,
+        action: 'branch_created',
+        branch: ref,
+        url,
+        summary,
+        eventType: event.type,
+        event,
+      },
+    };
+  }
+
+  return null;
+}
+
+function normalizeRecentRepoRecord(input: {
+  repo: GitHubRepoRecord;
+  author: string;
+  lookbackStart: Date;
+  seenRepoCreatedNames: ReadonlySet<string>;
+}): NormalizedEventInput | null {
+  const repoName = getRepoNameFromRepoRecord(input.repo);
+  const occurredAt = parseDate(input.repo.created_at);
+
+  if (repoName === null || occurredAt === null || occurredAt < input.lookbackStart) {
+    return null;
+  }
+
+  if (input.seenRepoCreatedNames.has(repoName)) {
+    return null;
+  }
+
+  const url = getString(input.repo.html_url) ?? buildRepoUrl(repoName);
+  const description = getString(input.repo.description);
+  const summary = buildRepoCreatedSummary(repoName, description);
+
+  return {
+    source: 'github',
+    sourceId: `repo_created:${repoName}`,
+    occurredAt,
+    author: input.author,
+    urlOrLocator: url,
+    title: `${repoName} repo created`,
+    summary,
+    rawText: summary,
+    tags: [`repo:${repoName}`, 'action:repo_created'],
+    rawPayload: {
+      repo: repoName,
+      action: 'repo_created',
+      url,
+      summary,
+      description,
+      private: getBoolean(input.repo.private),
+      synthesized: true,
+      source: 'repos_api',
+      repoRecord: input.repo,
+    },
+  };
+}
+
 function normalizeGitHubEvent(
   event: GitHubActivityRecord,
   githubUsername: string,
@@ -330,6 +498,10 @@ function normalizeGitHubEvent(
     return normalizeWatchEvent(event, repoName, occurredAt, author);
   }
 
+  if (eventType === 'CreateEvent') {
+    return normalizeCreateEvent(event, repoName, occurredAt, author);
+  }
+
   return null;
 }
 
@@ -351,6 +523,50 @@ function parseActivity(stdout: string): GitHubActivityRecord[] {
   return parsed.filter(isRecord) as GitHubActivityRecord[];
 }
 
+function parseRepoList(stdout: string): GitHubRepoRecord[] {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error('gh api did not return valid JSON repo data', {
+      cause: error,
+    });
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error('gh api repo payload must be an array');
+  }
+
+  return parsed.filter(isRecord) as GitHubRepoRecord[];
+}
+
+function getRepoCreatedNames(events: readonly NormalizedEventInput[]): Set<string> {
+  const repoNames = new Set<string>();
+
+  for (const event of events) {
+    const tags = event.tags ?? [];
+
+    if (!tags.includes('action:repo_created')) {
+      continue;
+    }
+
+    const repoTag = tags.find((tag) => tag.startsWith('repo:'));
+
+    if (!repoTag) {
+      continue;
+    }
+
+    const repoName = repoTag.slice('repo:'.length).trim();
+
+    if (repoName.length > 0) {
+      repoNames.add(repoName);
+    }
+  }
+
+  return repoNames;
+}
+
 async function defaultExecutor(command: string, args: string[]): Promise<ExecutorResult> {
   const result = await execFileAsync(command, args, {
     encoding: 'utf8',
@@ -362,8 +578,50 @@ async function defaultExecutor(command: string, args: string[]): Promise<Executo
   };
 }
 
-export function createGitHubSource(db: GitHubSourceDb, options: GitHubSourceOptions): GitHubSource {
+async function enrichPushEventsWithCommits(
+  events: GitHubActivityRecord[],
+  executor: (command: string, args: string[]) => Promise<ExecutorResult>,
+): Promise<void> {
+  for (const event of events) {
+    if (getString(event.type) !== 'PushEvent') continue;
+    if (!isRecord(event.payload)) continue;
+    const existingCommits = Array.isArray(event.payload.commits) ? event.payload.commits : [];
+    if (existingCommits.length > 0) continue;
+    const head = getString(event.payload.head);
+    const repoName = getRepoName(event);
+    if (head === null || repoName === null) continue;
+    try {
+      const { stdout } = await executor('gh', [
+        'api',
+        `/repos/${repoName}/commits/${head}`,
+        '--header',
+        'Accept: application/vnd.github+json',
+      ]);
+      const parsed = JSON.parse(stdout) as Record<string, unknown>;
+      const commitRecord = isRecord(parsed.commit) ? parsed.commit : null;
+      const message = commitRecord !== null ? getString(commitRecord.message) : null;
+      const authorRecord =
+        commitRecord !== null && isRecord(commitRecord.author) ? commitRecord.author : null;
+      const authorName = authorRecord !== null ? getString(authorRecord.name) : null;
+      if (message !== null) {
+        event.payload.commits = [
+          {
+            sha: head,
+            message,
+            author: authorName !== null ? { name: authorName } : null,
+          },
+        ];
+      }
+    } catch {
+      // Leave commits empty on fetch failure; normalizer will produce a zero-commit summary.
+    }
+  }
+}
+
+export function createGitHubSource(db: SourceDb, options: GitHubSourceOptions): GitHubSource {
   const activityLimit = options.activityLimit ?? 100;
+  const lookbackHours = options.lookbackHours ?? 12;
+  const getNow = options.now ?? (() => new Date());
   const executor = options.executor ?? defaultExecutor;
   const upsertEvents = options.upsertEvents ?? defaultUpsertEvents;
 
@@ -382,9 +640,36 @@ export function createGitHubSource(db: GitHubSourceDb, options: GitHubSourceOpti
         'Accept: application/vnd.github+json',
       ]);
       const activity = parseActivity(stdout);
-      const events = activity
+      await enrichPushEventsWithCommits(activity, executor);
+      const activityEvents = activity
         .map((event) => normalizeGitHubEvent(event, options.githubUsername))
         .filter((event): event is NormalizedEventInput => event !== null);
+      let synthesizedRepoCreatedEvents: NormalizedEventInput[] = [];
+
+      try {
+        const { stdout: reposStdout } = await executor('gh', [
+          'api',
+          `/user/repos?visibility=all&affiliation=owner&sort=created&per_page=${String(activityLimit)}`,
+          '--header',
+          'Accept: application/vnd.github+json',
+        ]);
+        const repoRecords = parseRepoList(reposStdout);
+        const seenRepoCreatedNames = getRepoCreatedNames(activityEvents);
+
+        synthesizedRepoCreatedEvents = repoRecords
+          .map((repo) =>
+            normalizeRecentRepoRecord({
+              repo,
+              author: options.githubUsername,
+              lookbackStart: subtractHours(getNow(), lookbackHours),
+              seenRepoCreatedNames,
+            }))
+          .filter((event): event is NormalizedEventInput => event !== null);
+      } catch {
+        synthesizedRepoCreatedEvents = [];
+      }
+
+      const events = [...activityEvents, ...synthesizedRepoCreatedEvents];
 
       if (events.length === 0) {
         return [];

@@ -50,24 +50,39 @@ const WindowsJsonSchema = z.string().min(1).transform((value, context) => {
 });
 
 const EnvSchema = z.object({
-  DATABASE_URL: DatabaseUrlSchema,
-  TELEGRAM_CONTROL_BOT_TOKEN: z.string().min(1),
-  TELEGRAM_CONTROL_CHAT_ID: z.string().regex(/^-?\d+$/),
-  HERMES_BIN: z.string().min(1),
-  X_BEARER_TOKEN: z.string().min(1),
-  GITHUB_USERNAME: z.string().min(1),
-  INNIES_BUYER_KEY_NAME: z.string().min(1),
-  SLACK_AUTHOR_NAMES: CsvListSchema,
-  SLACK_AUTHOR_USER_IDS: CsvListSchema,
-  POST_PROFILE: z.string().min(1),
-  CLAWD_TWEET_SCRIPT: z.string().min(1),
-  WINDOWS_JSON: WindowsJsonSchema,
+  DATABASE_URL: z.string().min(1).optional(),  // optional — MCP client uses MCP_DB_URL, not this
+  TELEGRAM_CONTROL_BOT_TOKEN: z.string().min(1).optional(),
+  TELEGRAM_CONTROL_CHAT_ID: z.string().regex(/^-?\d+$/).optional(),
+  TELEGRAM_API_BASE_URL: z.string().url().optional(),
+  HERMES_BIN: z.string().min(1).optional(),
+  X_BEARER_TOKEN: z.string().min(1).optional(),
+  GITHUB_USERNAME: z.string().min(1).optional(),
+  INNIES_API_KEY: z.string().min(1).optional(),
+  INNIES_BUYER_KEY_ID: z.string().min(1).optional(),
+  INNIES_BUYER_KEY_NAME: z.string().min(1).optional(),
+  SLACK_AUTHOR_NAMES: CsvListSchema.optional(),
+  SLACK_AUTHOR_USER_IDS: CsvListSchema.optional(),
+  POST_PROFILE: z.string().min(1).optional(),
+  CLAWD_TWEET_SCRIPT: z.string().min(1).optional(),
+  WINDOWS_JSON: WindowsJsonSchema.optional(),
+  // X OAuth 1.0a — new, loaded from .env
+  X_CONSUMER_KEY: z.string().min(1).optional(),
+  X_CONSUMER_SECRET: z.string().min(1).optional(),
+  X_ACCESS_TOKEN: z.string().min(1).optional(),
+  X_ACCESS_TOKEN_SECRET: z.string().min(1).optional(),
+  X_API_BASE_URL: z.string().url().optional(),
+  PUBLISH_GRACE_MINUTES: z
+    .string()
+    .regex(/^\d+$/)
+    .transform((value) => Number.parseInt(value, 10))
+    .optional(),
 });
 
 export type AppEnv = {
   databaseUrl: string;
   telegramControlBotToken: string;
   telegramControlChatId: string;
+  telegramApiBaseUrl?: string | undefined;
   hermesBin: string;
   xBearerToken: string;
   githubUsername: string;
@@ -77,6 +92,7 @@ export type AppEnv = {
   postProfile: string;
   clawdTweetScript: string;
   windowsJson: unknown[];
+  publishGraceMinutes: number;
 };
 
 export function loadEnv(input: Record<string, string | undefined> = process.env): AppEnv {
@@ -86,14 +102,18 @@ export function loadEnv(input: Record<string, string | undefined> = process.env)
     databaseUrl: parsed.DATABASE_URL,
     telegramControlBotToken: parsed.TELEGRAM_CONTROL_BOT_TOKEN,
     telegramControlChatId: parsed.TELEGRAM_CONTROL_CHAT_ID,
+    telegramApiBaseUrl: parsed.TELEGRAM_API_BASE_URL,
     hermesBin: parsed.HERMES_BIN,
     xBearerToken: parsed.X_BEARER_TOKEN,
     githubUsername: parsed.GITHUB_USERNAME,
+    inniesApiKey: parsed.INNIES_API_KEY,
+    inniesBuyerKeyId: parsed.INNIES_BUYER_KEY_ID,
     inniesBuyerKeyName: parsed.INNIES_BUYER_KEY_NAME,
-    slackAuthorNames: parsed.SLACK_AUTHOR_NAMES,
-    slackAuthorUserIds: parsed.SLACK_AUTHOR_USER_IDS,
+    slackAuthorNames: parsed.SLACK_AUTHOR_NAMES ?? [],
+    slackAuthorUserIds: parsed.SLACK_AUTHOR_USER_IDS ?? [],
     postProfile: parsed.POST_PROFILE,
     clawdTweetScript: parsed.CLAWD_TWEET_SCRIPT,
     windowsJson: parsed.WINDOWS_JSON,
+    publishGraceMinutes: parsed.PUBLISH_GRACE_MINUTES ?? 10,
   };
 }

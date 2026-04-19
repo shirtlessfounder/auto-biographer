@@ -2,19 +2,18 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { Pool } from 'pg';
-
-import { createPool } from './pool';
+import { getPool } from './mcp-client';
+import type { Queryable } from './pool';
 import { createMigrationsRepository } from './repositories/migrations-repository';
 
 const defaultMigrationsDirectory = fileURLToPath(new URL('./migrations', import.meta.url));
 
 export async function runMigrations(
-  pool: Pool,
+  db: Queryable,
   options?: { migrationsDirectory?: string },
 ): Promise<string[]> {
   const migrationsDirectory = options?.migrationsDirectory ?? defaultMigrationsDirectory;
-  const migrationsRepository = createMigrationsRepository(pool);
+  const migrationsRepository = createMigrationsRepository(db);
 
   await migrationsRepository.ensureSchemaMigrationsTable();
 
@@ -30,22 +29,29 @@ export async function runMigrations(
     }
 
     const sql = await readFile(path.join(migrationsDirectory, fileName), 'utf8');
-    const client = await pool.connect();
 
-    try {
-      await client.query('begin');
-      await client.query(sql);
-
-      const repository = createMigrationsRepository(client);
-      await repository.recordAppliedMigration(fileName);
-
-      await client.query('commit');
-      appliedThisRun.push(fileName);
-    } catch (error) {
-      await client.query('rollback');
-      throw error;
-    } finally {
-      client.release();
+    // Support both pg Pool (with connect/begin/commit/rollback) and
+    // our MCP TransactionConnection (with begin/commit/rollback/release)
+    if ('connect' in db && typeof db.connect === 'function') {
+      // pg Pool — use transaction connection
+      const client = await db.connect();
+      try {
+        await client.query('begin');
+        await client.query(sql);
+        const repository = createMigrationsRepository(client);
+        await repository.recordAppliedMigration(fileName);
+        await client.query('commit');
+        appliedThisRun.push(fileName);
+      } catch (error) {
+        await client.query('rollback');
+        throw error;
+      } finally {
+        client.release();
+      }
+    } else {
+      // Queryable without transactions — run bare (migrate.ts entry point
+      // always uses McpPool which has connect())
+      throw new Error('migrate.ts requires a Pool with transaction support');
     }
   }
 
@@ -59,7 +65,7 @@ async function main(): Promise<void> {
     throw new Error('DATABASE_URL is required');
   }
 
-  const pool = createPool(databaseUrl);
+  const pool = await getPool();
 
   try {
     const appliedMigrations = await runMigrations(pool);

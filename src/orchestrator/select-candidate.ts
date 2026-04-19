@@ -1,7 +1,8 @@
 import { createCandidatesRepository, type CandidateRecord } from '../db/repositories/candidates-repository';
 import type { Queryable } from '../db/pool';
-import { enrichQuoteTarget, type EnrichedQuoteTarget } from '../enrichment/x/enrich-quote-target';
+import type { EnrichedQuoteTarget } from '../enrichment/x/enrich-quote-target';
 import type { XThreadLookupClient } from '../enrichment/x/client';
+import { findRelevantGitHubRepoUrl } from '../github/repo-link';
 import {
   runHermesSelector,
   type HermesExecutor,
@@ -51,6 +52,7 @@ export type SelectedCandidatePacket = {
   events: ContextEvent[];
   artifacts: ContextArtifact[];
   quoteTargetEnrichment: EnrichedQuoteTarget | null;
+  repoLinkUrl: string | null;
 };
 
 export type SelectorSkipOutcome = {
@@ -72,6 +74,7 @@ export type SelectCandidateInput = {
   db: Queryable;
   context: RecentContextPacket;
   triggerType: string;
+  fallbackOnSkip?: boolean | undefined;
   runSelector?: SelectorRunner | undefined;
   hermesBin?: string | undefined;
   hermesExecutor?: HermesExecutor | undefined;
@@ -84,6 +87,8 @@ type RawSlackLinkPayload = Record<string, unknown> & {
   finalUrl?: unknown;
   sourceUrl?: unknown;
 };
+
+const QUOTE_TWEETS_ENABLED = false;
 
 function getString(value: unknown): string | null {
   if (typeof value !== 'string') {
@@ -155,6 +160,147 @@ function dedupeArtifacts(artifacts: readonly ContextArtifact[]): ContextArtifact
   return Array.from(deduped.values());
 }
 
+function normalizeWhitespace(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function getEventSourcePriority(event: ContextEvent): number {
+  switch (event.source) {
+    case 'github':
+      return 400;
+    case 'agent_conversation':
+      return 300;
+    case 'slack_message':
+      return 200;
+    case 'slack_link':
+      return 100;
+    default:
+      return 0;
+  }
+}
+
+function scoreFallbackEvent(event: ContextEvent): number {
+  let score = getEventSourcePriority(event);
+
+  if (event.artifacts.length > 0) {
+    score += 25;
+  }
+
+  if (getString(event.title) !== null) {
+    score += 10;
+  }
+
+  if (getString(event.summary) !== null) {
+    score += 10;
+  }
+
+  if (getString(event.rawText) !== null) {
+    score += 5;
+  }
+
+  return score;
+}
+
+function compareFallbackEvents(left: ContextEvent, right: ContextEvent): number {
+  const scoreDelta = scoreFallbackEvent(right) - scoreFallbackEvent(left);
+
+  if (scoreDelta !== 0) {
+    return scoreDelta;
+  }
+
+  const occurredAtDelta = new Date(right.occurredAt).getTime() - new Date(left.occurredAt).getTime();
+
+  if (occurredAtDelta !== 0) {
+    return occurredAtDelta;
+  }
+
+  return right.id - left.id;
+}
+
+function buildFallbackPrimaryAnchor(event: ContextEvent): string {
+  const candidates = [
+    getString(event.title),
+    getString(event.summary),
+    getString(event.rawText),
+    ...event.artifacts.map((artifact) => getString(artifact.contentText)),
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate !== null) {
+      return truncateText(normalizeWhitespace(candidate), 160);
+    }
+  }
+
+  return `${event.source} activity from ${event.occurredAt}`;
+}
+
+function buildFallbackSupportingPoints(event: ContextEvent, primaryAnchor: string, skipReason: string): string[] {
+  const supportingPoints: string[] = [];
+  const seen = new Set<string>([primaryAnchor]);
+
+  const maybeAdd = (value: string | null) => {
+    if (value === null) {
+      return;
+    }
+
+    const normalized = truncateText(normalizeWhitespace(value), 160);
+
+    if (seen.has(normalized)) {
+      return;
+    }
+
+    supportingPoints.push(normalized);
+    seen.add(normalized);
+  };
+
+  maybeAdd(event.summary);
+  maybeAdd(event.rawText);
+  maybeAdd(event.artifacts[0]?.contentText ?? null);
+  maybeAdd(`Source: ${event.source}`);
+  maybeAdd(`Selector skipped this slot: ${skipReason}`);
+
+  if (supportingPoints.length === 0) {
+    supportingPoints.push('Scheduled fallback picked the strongest recent context still available.');
+  }
+
+  return supportingPoints;
+}
+
+function buildFallbackSelectorPayload(
+  context: RecentContextPacket,
+  skipReason: string,
+): HermesSelectorPayload | null {
+  const selectedEvent = [...context.events].sort(compareFallbackEvents)[0];
+
+  if (!selectedEvent) {
+    return null;
+  }
+
+  const primaryAnchor = buildFallbackPrimaryAnchor(selectedEvent);
+
+  return {
+    decision: 'select',
+    candidate_type: selectedEvent.source === 'github' ? 'ship_update' : 'work_update',
+    angle: `Scheduled fallback: ${primaryAnchor}`,
+    why_interesting: 'Scheduled runs should still surface the strongest recent work instead of silently skipping.',
+    source_event_ids: [selectedEvent.id],
+    artifact_ids: selectedEvent.artifacts.map((artifact) => artifact.id),
+    primary_anchor: primaryAnchor,
+    supporting_points: buildFallbackSupportingPoints(selectedEvent, primaryAnchor, skipReason),
+    quote_target: null,
+    suggested_media_kind: null,
+    suggested_media_request: null,
+  };
+}
+
 type CandidateSourceLinkInput = {
   eventId: number;
   artifactId: number | null;
@@ -183,55 +329,6 @@ function buildCandidateSourceLinks(
   return Array.from(links.values());
 }
 
-function getRawSlackLinkPayload(value: unknown): RawSlackLinkPayload | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return null;
-  }
-
-  return value as RawSlackLinkPayload;
-}
-
-async function enrichSelectedQuoteTarget(
-  events: readonly ContextEvent[],
-  xLookupClient: XThreadLookupClient | undefined,
-): Promise<EnrichedQuoteTarget | null> {
-  if (!xLookupClient) {
-    return null;
-  }
-
-  for (const event of events) {
-    if (event.source !== 'slack_link') {
-      continue;
-    }
-
-    const payload = getRawSlackLinkPayload(event.rawPayload);
-    const candidate = {
-      canonicalUrl: getString(payload?.canonicalUrl),
-      domain: getString(payload?.domain) ?? '',
-      finalUrl: getString(payload?.finalUrl),
-      id: event.sourceId,
-      url:
-        getString(payload?.sourceUrl)
-        ?? getString(payload?.finalUrl)
-        ?? getString(payload?.canonicalUrl)
-        ?? event.urlOrLocator
-        ?? '',
-    };
-
-    if (candidate.domain.length === 0 || candidate.url.length === 0) {
-      continue;
-    }
-
-    const enriched = await enrichQuoteTarget(candidate, xLookupClient);
-
-    if (enriched) {
-      return enriched;
-    }
-  }
-
-  return null;
-}
-
 async function persistCandidateSourceLinks(
   db: Queryable,
   candidateId: string,
@@ -254,6 +351,7 @@ export async function selectCandidate({
   db,
   context,
   triggerType,
+  fallbackOnSkip = false,
   runSelector,
   hermesBin,
   hermesExecutor,
@@ -261,7 +359,29 @@ export async function selectCandidate({
 }: SelectCandidateInput): Promise<SelectCandidateOutcome> {
   const candidatesRepository = createCandidatesRepository(db);
   const selector = buildSelectorRunner({ runSelector, hermesBin, hermesExecutor });
-  const selectorResult = await selector(context);
+  const selectorDecision = await selector(context);
+  const selectorResult =
+    selectorDecision.decision === 'skip' && fallbackOnSkip
+      ? buildFallbackSelectorPayload(context, selectorDecision.reason) ?? selectorDecision
+      : selectorDecision;
+
+  // Defensive guard: if Hermes returned 'select' with no valid source_event_ids,
+  // treat it as a skip rather than crashing on Zod validation downstream.
+  // This can happen when the model hallucinates a selection against empty context.
+  if (selectorResult.decision === 'select' && selectorResult.source_event_ids.length === 0) {
+    const reason = 'Hermes returned select with no source_event_ids; no valid events to surface.';
+    return {
+      outcome: 'skip',
+      selectorResult: { decision: 'skip', reason },
+      candidate: await candidatesRepository.createCandidate({
+        triggerType,
+        candidateType: 'skip',
+        status: 'selector_skipped',
+        selectorOutputJson: selectorResult,
+        errorDetails: reason,
+      }),
+    };
+  }
 
   if (selectorResult.decision === 'skip') {
     return {
@@ -279,8 +399,9 @@ export async function selectCandidate({
 
   const selectedEvents = findSelectedEvents(context, selectorResult.source_event_ids);
   const selectedArtifacts = findSelectedArtifacts(selectedEvents, selectorResult.artifact_ids);
-  const quoteTargetEnrichment = await enrichSelectedQuoteTarget(selectedEvents, xLookupClient);
-  const resolvedQuoteTargetUrl = selectorResult.quote_target ?? quoteTargetEnrichment?.canonicalUrl ?? null;
+  const quoteTargetEnrichment: EnrichedQuoteTarget | null = null;
+  const resolvedQuoteTargetUrl = null;
+  const repoLinkUrl = findRelevantGitHubRepoUrl(selectedEvents);
   const candidate = await candidatesRepository.createCandidate({
     triggerType,
     candidateType: selectorResult.candidate_type,
@@ -331,6 +452,7 @@ export async function selectCandidate({
       events: selectedEvents,
       artifacts: selectedArtifacts,
       quoteTargetEnrichment,
+      repoLinkUrl,
     },
   };
 }

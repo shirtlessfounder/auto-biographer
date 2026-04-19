@@ -1,8 +1,13 @@
 import type { Queryable } from '../db/pool';
 import type { NormalizedEventSource } from '../normalization/types';
 
-const DEFAULT_LOOKBACK_HOURS = 12;
+const DEFAULT_LOOKBACK_HOURS = 16;
 const DEFAULT_RECENT_PUBLISHED_POSTS_LIMIT = 5;
+const DEFAULT_PENDING_APPROVAL_CANDIDATES_LIMIT = 5;
+const ACTIVE_PENDING_APPROVAL_STATUSES = ['pending_approval', 'reminded', 'held'] as const;
+const MAX_CONTEXT_EVENT_RAW_TEXT_CHARS = 2000;
+const MAX_CONTEXT_ARTIFACT_TEXT_CHARS = 600;
+const MAX_CONTEXT_ARTIFACTS_PER_EVENT = 12;
 
 const CONTEXT_SOURCES: readonly NormalizedEventSource[] = [
   'slack_message',
@@ -46,6 +51,16 @@ type PublishedPostRow = {
   media_attached: boolean;
 };
 
+type PendingApprovalCandidateRow = {
+  id: string;
+  status: string;
+  candidate_type: string;
+  created_at: Date;
+  final_post_text: string | null;
+  quote_target_url: string | null;
+  media_request: string | null;
+};
+
 export type ContextArtifact = {
   id: number;
   eventId: number;
@@ -82,6 +97,16 @@ export type RecentPublishedPostSummary = {
   mediaAttached: boolean;
 };
 
+export type PendingApprovalCandidateSummary = {
+  id: number;
+  status: string;
+  candidateType: string;
+  createdAt: string;
+  finalPostText: string | null;
+  quoteTargetUrl: string | null;
+  mediaRequest: string | null;
+};
+
 export type RecentContextPacket = {
   kind: 'recent_context';
   generatedAt: string;
@@ -89,6 +114,7 @@ export type RecentContextPacket = {
   windowEnd: string;
   events: ContextEvent[];
   recentPublishedPosts: RecentPublishedPostSummary[];
+  pendingApprovalCandidates: PendingApprovalCandidateSummary[];
 };
 
 export type BuildRecentContextPacketInput = {
@@ -96,6 +122,7 @@ export type BuildRecentContextPacketInput = {
   now?: (() => Date) | undefined;
   lookbackHours?: number | undefined;
   recentPublishedPostsLimit?: number | undefined;
+  pendingApprovalCandidatesLimit?: number | undefined;
 };
 
 function parseDbId(value: string): number {
@@ -112,13 +139,25 @@ function subtractHours(value: Date, hours: number): Date {
   return new Date(value.getTime() - hours * 60 * 60 * 1000);
 }
 
+function truncateContextText(value: string | null, maxLength: number): string | null {
+  if (!value) {
+    return value;
+  }
+
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
 function mapArtifactRow(row: ArtifactRow): ContextArtifact {
   return {
     id: parseDbId(row.id),
     eventId: parseDbId(row.event_id),
     artifactType: row.artifact_type,
     artifactKey: row.artifact_key,
-    contentText: row.content_text,
+    contentText: truncateContextText(row.content_text, MAX_CONTEXT_ARTIFACT_TEXT_CHARS),
     contentJson: row.content_json,
     sourceUrl: row.source_url,
   };
@@ -128,7 +167,7 @@ function mapPublishedPostRow(row: PublishedPostRow): RecentPublishedPostSummary 
   return {
     id: parseDbId(row.id),
     candidateId: parseDbId(row.candidate_id),
-    postedAt: row.posted_at.toISOString(),
+    postedAt: typeof row.posted_at === 'string' ? row.posted_at : row.posted_at.toISOString(),
     postType: row.post_type,
     finalText: row.final_text,
     quoteTargetUrl: row.quote_target_url,
@@ -136,11 +175,41 @@ function mapPublishedPostRow(row: PublishedPostRow): RecentPublishedPostSummary 
   };
 }
 
+function mapPendingApprovalCandidateRow(row: PendingApprovalCandidateRow): PendingApprovalCandidateSummary {
+  return {
+    id: parseDbId(row.id),
+    status: row.status,
+    candidateType: row.candidate_type,
+    createdAt: typeof row.created_at === 'string' ? row.created_at : row.created_at.toISOString(),
+    finalPostText: row.final_post_text,
+    quoteTargetUrl: row.quote_target_url,
+    mediaRequest: row.media_request,
+  };
+}
+
+function limitArtifactsForContext(artifacts: readonly ContextArtifact[]): ContextArtifact[] {
+  if (artifacts.length <= MAX_CONTEXT_ARTIFACTS_PER_EVENT) {
+    return [...artifacts];
+  }
+
+  const headCount = Math.ceil(MAX_CONTEXT_ARTIFACTS_PER_EVENT / 2);
+  const tailCount = MAX_CONTEXT_ARTIFACTS_PER_EVENT - headCount;
+  const selected = [...artifacts.slice(0, headCount), ...artifacts.slice(-tailCount)];
+  const deduped = new Map<number, ContextArtifact>();
+
+  for (const artifact of selected) {
+    deduped.set(artifact.id, artifact);
+  }
+
+  return Array.from(deduped.values());
+}
+
 export async function buildRecentContextPacket({
   db,
   now = () => new Date(),
   lookbackHours = DEFAULT_LOOKBACK_HOURS,
   recentPublishedPostsLimit = DEFAULT_RECENT_PUBLISHED_POSTS_LIMIT,
+  pendingApprovalCandidatesLimit = DEFAULT_PENDING_APPROVAL_CANDIDATES_LIMIT,
 }: BuildRecentContextPacketInput): Promise<RecentContextPacket> {
   const windowEnd = now();
   const windowStart = subtractHours(windowEnd, lookbackHours);
@@ -161,9 +230,9 @@ export async function buildRecentContextPacket({
         artifact_refs,
         raw_payload
       from sp_events
-      where source = any($1::text[])
-        and occurred_at >= $2
-        and occurred_at <= $3
+      where source IN ($1, $2, $3, $4)
+        and occurred_at >= $5
+        and occurred_at <= $6
         and not exists (
           select 1
           from sp_source_usage source_usage
@@ -171,12 +240,13 @@ export async function buildRecentContextPacket({
         )
       order by occurred_at desc, id desc
     `,
-    [CONTEXT_SOURCES, windowStart, windowEnd],
+    ['slack_message', 'slack_link', 'agent_conversation', 'github', windowStart, windowEnd],
   );
   const eventIds = eventsResult.rows.map((row) => row.id);
   const artifactsByEventId = new Map<number, ContextArtifact[]>();
 
   if (eventIds.length > 0) {
+    const eventIdPlaceholders = eventIds.map((_, i) => `$${i + 1}`).join(', ');
     const artifactsResult = await db.query<ArtifactRow>(
       `
         select
@@ -188,7 +258,7 @@ export async function buildRecentContextPacket({
           content_json,
           source_url
         from sp_artifacts
-        where event_id = any($1::bigint[])
+        where event_id IN (${eventIdPlaceholders})
           and not exists (
             select 1
             from sp_source_usage source_usage
@@ -196,7 +266,7 @@ export async function buildRecentContextPacket({
           )
         order by event_id asc, id asc
       `,
-      [eventIds],
+      eventIds,
     );
 
     for (const artifactRow of artifactsResult.rows) {
@@ -223,6 +293,23 @@ export async function buildRecentContextPacket({
     `,
     [recentPublishedPostsLimit],
   );
+  const pendingApprovalCandidatesResult = await db.query<PendingApprovalCandidateRow>(
+    `
+      select
+        id,
+        status,
+        candidate_type,
+        created_at,
+        final_post_text,
+        quote_target_url,
+        media_request
+      from sp_post_candidates
+      where status IN ($1, $2, $3)
+      order by created_at desc, id desc
+      limit $4
+    `,
+    ['pending_approval', 'reminded', 'held', pendingApprovalCandidatesLimit],
+  );
 
   return {
     kind: 'recent_context',
@@ -236,18 +323,19 @@ export async function buildRecentContextPacket({
         id: eventId,
         source: row.source,
         sourceId: row.source_id,
-        occurredAt: row.occurred_at.toISOString(),
+        occurredAt: typeof row.occurred_at === 'string' ? row.occurred_at : row.occurred_at.toISOString(),
         author: row.author,
         urlOrLocator: row.url_or_locator,
         title: row.title,
         summary: row.summary,
-        rawText: row.raw_text,
+        rawText: truncateContextText(row.raw_text, MAX_CONTEXT_EVENT_RAW_TEXT_CHARS),
         tags: row.tags,
         artifactRefs: row.artifact_refs,
         rawPayload: row.raw_payload,
-        artifacts: artifactsByEventId.get(eventId) ?? [],
+        artifacts: limitArtifactsForContext(artifactsByEventId.get(eventId) ?? []),
       };
     }),
     recentPublishedPosts: recentPublishedPostsResult.rows.map(mapPublishedPostRow),
+    pendingApprovalCandidates: pendingApprovalCandidatesResult.rows.map(mapPendingApprovalCandidateRow),
   };
 }

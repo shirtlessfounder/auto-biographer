@@ -1,4 +1,5 @@
-import type { Pool, PoolClient } from 'pg';
+import type { Pool } from 'pg';
+import type { Queryable } from '../db/pool';
 
 import { upsertEvents, type UpsertedNormalizedEvent } from '../normalization/upsert-events';
 import type { NormalizedArtifactInput, NormalizedEventInput } from '../normalization/types';
@@ -6,6 +7,7 @@ import type { NormalizedArtifactInput, NormalizedEventInput } from '../normaliza
 type SlackAuthorFilters = {
   authorNames: readonly string[];
   authorUserIds: readonly string[];
+  lookbackHours?: number;
 };
 
 type SlackLinkRow = Record<string, unknown> & {
@@ -15,6 +17,20 @@ type SlackLinkRow = Record<string, unknown> & {
 type SlackLinksSource = {
   sync(): Promise<UpsertedNormalizedEvent[]>;
 };
+
+const LOAD_SLACK_LINKS_SQL = `
+  select id, url, canonical_url, final_url, domain, adapter, status, title, author,
+    published_at,
+    http_status, content_type, first_seen_at, captured_at,
+    slack_team_id, slack_channel_id, slack_channel_name, slack_user_id,
+    slack_message_ts, slack_permalink, error_code, error_message, created_at, updated_at
+  from sl_links
+  where (
+    $1::integer is null
+    or coalesce(first_seen_at, captured_at) >= now() - ($1::integer * interval '1 hour')
+  )
+  order by id asc
+`;
 
 const SLACK_LINK_AUTHOR_NAME_KEYS = [
   'slack_user_name',
@@ -109,6 +125,12 @@ function matchesSlackLinkAuthor(
 ): boolean {
   const authorNames = buildAuthorSet(filters.authorNames);
   const authorUserIds = buildAuthorSet(filters.authorUserIds);
+  const hasAuthorFilter = authorNames.size > 0 || authorUserIds.size > 0;
+
+  if (!hasAuthorFilter) {
+    return true; // no filter → pass all
+  }
+
   const authorName = getString(row, SLACK_LINK_AUTHOR_NAME_KEYS);
   const authorUserId = getString(row, SLACK_LINK_AUTHOR_USER_ID_KEYS);
 
@@ -197,12 +219,13 @@ function normalizeSlackLinkRow(row: SlackLinkRow, filters: SlackAuthorFilters): 
 }
 
 export function createSlackLinksSource(
-  db: Pool | PoolClient,
+  db: Queryable,
   filters: SlackAuthorFilters,
 ): SlackLinksSource {
   return {
     async sync(): Promise<UpsertedNormalizedEvent[]> {
-      const result = await db.query<SlackLinkRow>('select * from sl_links order by id asc');
+      const result = await db.query<SlackLinkRow>(LOAD_SLACK_LINKS_SQL, [filters.lookbackHours ?? null]);
+      console.error(`[slack-links] query returned ${result.rowCount} rows, lookbackHours=${filters.lookbackHours}, authorUserIds=${filters.authorUserIds}`);
       const events = result.rows
         .map((row) => normalizeSlackLinkRow(row, filters))
         .filter((event): event is NormalizedEventInput => event !== null);
