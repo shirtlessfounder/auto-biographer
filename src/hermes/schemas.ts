@@ -37,6 +37,7 @@ export const HermesDrafterPayloadSchema = z
     why_chosen: NonEmptyStringSchema,
     receipts: z.array(NonEmptyStringSchema).min(1),
     media_request: z.union([NonEmptyStringSchema, z.null()]),
+    include_repo_link: z.boolean().default(false),
     allowed_commands: z.array(NonEmptyStringSchema).min(1),
   })
   .strict();

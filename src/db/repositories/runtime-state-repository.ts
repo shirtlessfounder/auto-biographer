@@ -228,5 +228,33 @@ export function createRuntimeStateRepository(db: Queryable) {
         [stateKey],
       );
     },
+
+    /**
+     * Bulk-reclaim stuck in_progress slots under a state_key prefix whose
+     * updated_at is older than staleThresholdMs. Flips status to retry_pending
+     * so the normal claim flow can pick them up.
+     * Returns the set of reclaimed state keys.
+     */
+    async reapStuckSlots(
+      stateKeyPrefix: string,
+      staleThresholdMs: number,
+    ): Promise<RuntimeStateRecord[]> {
+      const result = await db.query<RuntimeStateRow>(
+        `
+          update sp_runtime_state
+          set state_json = jsonb_set(state_json, '{status}', '"retry_pending"'),
+              updated_at = now()
+          where state_key like $1
+            and state_json ->> 'status' = 'in_progress'
+            and (
+              extract(epoch from (now() - updated_at)) * 1000
+            ) > $2
+          returning state_key, state_json, updated_at
+        `,
+        [`${stateKeyPrefix}%`, staleThresholdMs],
+      );
+
+      return result.rows.map(mapRuntimeStateRow);
+    },
   };
 }

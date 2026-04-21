@@ -208,6 +208,41 @@ async function listFinalizedSlotIds(
   );
 }
 
+// Slots stuck in `in_progress` beyond this threshold are assumed to be orphans
+// from a crashed/killed tick. Legitimate ticks never exceed a few minutes.
+const STUCK_SLOT_THRESHOLD_MS = 15 * 60 * 1000;
+
+async function reapStuckWindowSlots(input: {
+  runtimeStateRepository: ReturnType<typeof createRuntimeStateRepository>;
+  telegramClient: TelegramClient;
+}): Promise<string[]> {
+  const reaped = await input.runtimeStateRepository.reapStuckSlots(
+    SLOT_STATE_KEY_PREFIX,
+    STUCK_SLOT_THRESHOLD_MS,
+  );
+
+  if (reaped.length === 0) {
+    return [];
+  }
+
+  const reapedSlotIds = reaped.map((state) =>
+    state.stateKey.slice(SLOT_STATE_KEY_PREFIX.length),
+  );
+
+  console.error(`[tick] reaper: reclaimed ${String(reapedSlotIds.length)} stuck slot(s): ${reapedSlotIds.join(', ')}`);
+
+  try {
+    await input.telegramClient.sendMessage({
+      text: `reaper: reclaimed stuck slot(s): ${reapedSlotIds.join(', ')}`,
+      disableWebPagePreview: true,
+    });
+  } catch {
+    // Alert is best-effort.
+  }
+
+  return reapedSlotIds;
+}
+
 async function buildWindowFractionMap(input: {
   runtimeStateRepository: ReturnType<typeof createRuntimeStateRepository>;
   windows: readonly WindowDefinition[];
@@ -631,6 +666,12 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
   const runtimeStateRepository = createRuntimeStateRepository(input.db);
   const telegramActionsRepository = createTelegramActionsRepository(input.db);
   const windows = parseWindowsJson(input.windowsJson);
+  if (!dryRun) {
+    await reapStuckWindowSlots({
+      runtimeStateRepository,
+      telegramClient: input.telegramClient,
+    });
+  }
   const finalizedSlotIds = await listFinalizedSlotIds(runtimeStateRepository);
   const fractionsByslotId = await buildWindowFractionMap({
     runtimeStateRepository,

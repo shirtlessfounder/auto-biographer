@@ -5,7 +5,7 @@ import { createServer } from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import type { Pool } from 'pg';
+import type { McpPool } from '../../../src/db/pool';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { runMigrations } from '../../../src/db/migrate';
@@ -16,7 +16,7 @@ const execFileAsync = promisify(execFile);
 type TestDatabase = {
   dataDirectory: string;
   logFilePath: string;
-  pool: Pool;
+  pool: McpPool;
   port: number;
 };
 
@@ -92,7 +92,7 @@ async function createTestDatabase(): Promise<TestDatabase> {
     'start',
   ]);
 
-  const pool = createPool(
+  const pool = await createPool(
     `postgres://${encodeURIComponent(process.env.USER ?? 'postgres')}@127.0.0.1:${String(port)}/postgres`,
   );
 
@@ -115,12 +115,6 @@ async function stopTestDatabase(database: TestDatabase): Promise<void> {
   await rm(path.dirname(database.dataDirectory), { force: true, recursive: true });
 }
 
-async function resetSchema(pool: Pool): Promise<void> {
-  await pool.query(`
-    drop schema public cascade;
-    create schema public;
-  `);
-}
 
 async function createFixtureMigrationsDirectory(): Promise<string> {
   const migrationsDirectory = await mkdtemp(path.join(tmpdir(), 'social-posting-migrations-'));
@@ -152,7 +146,7 @@ describe('runMigrations', () => {
   });
 
   beforeEach(async () => {
-    await resetSchema(database.pool);
+    await database.pool.resetSchema();
   });
 
   afterAll(async () => {

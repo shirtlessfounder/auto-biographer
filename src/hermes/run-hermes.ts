@@ -11,6 +11,10 @@ import {
 
 const execFileAsync = promisify(execFile);
 const MAX_HERMES_OUTPUT_BYTES = 1024 * 1024;
+// Keep strictly below the outer Hermes gateway's 120s shell-tool timeout so
+// the tick can transition slot/candidate to a failed state instead of being
+// SIGKILLed mid-write (which would leave slot in_progress for the reaper).
+const HERMES_SUBPROCESS_TIMEOUT_MS = 90_000;
 const HERMES_ONE_SHOT_WRAPPER = [
   'import os',
   'import sys',
@@ -76,12 +80,22 @@ async function defaultExecutor(command: string, args: string[]): Promise<HermesC
     });
   }
 
-  const { stdout, stderr } = await execFileAsync(command, args, {
-    encoding: 'utf8',
-    maxBuffer: MAX_HERMES_OUTPUT_BYTES,
-  });
-
-  return { stdout, stderr };
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, {
+      encoding: 'utf8',
+      maxBuffer: MAX_HERMES_OUTPUT_BYTES,
+      timeout: HERMES_SUBPROCESS_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    });
+    return { stdout, stderr };
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && 'signal' in error && error.signal === 'SIGKILL') {
+      throw new Error(
+        `Hermes subprocess timed out after ${String(HERMES_SUBPROCESS_TIMEOUT_MS)}ms`,
+      );
+    }
+    throw error;
+  }
 }
 
 async function loadPrompt(promptName: PromptName): Promise<string> {
@@ -182,6 +196,12 @@ async function runHermesViaPython(input: {
     });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, HERMES_SUBPROCESS_TIMEOUT_MS);
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -189,6 +209,7 @@ async function runHermesViaPython(input: {
     child.stdout.on('data', (chunk: string) => {
       stdout += chunk;
       if (stdout.length > MAX_HERMES_OUTPUT_BYTES) {
+        clearTimeout(timeoutHandle);
         child.kill('SIGTERM');
         reject(new Error('Hermes stdout exceeded maxBuffer'));
       }
@@ -196,12 +217,27 @@ async function runHermesViaPython(input: {
     child.stderr.on('data', (chunk: string) => {
       stderr += chunk;
       if (stderr.length > MAX_HERMES_OUTPUT_BYTES) {
+        clearTimeout(timeoutHandle);
         child.kill('SIGTERM');
         reject(new Error('Hermes stderr exceeded maxBuffer'));
       }
     });
-    child.on('error', reject);
+    child.on('error', (err) => {
+      clearTimeout(timeoutHandle);
+      reject(err);
+    });
     child.on('close', (code, signal) => {
+      clearTimeout(timeoutHandle);
+
+      if (timedOut) {
+        reject(
+          new Error(
+            `Hermes subprocess timed out after ${String(HERMES_SUBPROCESS_TIMEOUT_MS)}ms`,
+          ),
+        );
+        return;
+      }
+
       if (code === 0) {
         resolve({ stdout, stderr });
         return;

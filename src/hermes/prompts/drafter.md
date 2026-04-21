@@ -12,7 +12,8 @@ Return exactly this success payload shape:
   "why_chosen": "short rationale for the draft",
   "receipts": ["compact factual receipt"],
   "media_request": "concise media direction or null",
-  "allowed_commands": ["skip", "hold", "post now", "edit: ...", "another angle"]
+  "include_repo_link": false,
+  "allowed_commands": ["skip", "post now", "edit to ...", "another angle"]
 }
 
 There is no skip. Every candidate becomes a tweet. Your job is to find the most interesting or funny angle and write it — even from thin material.
@@ -26,8 +27,8 @@ Rules:
 - `draft_text` must fit inside X's 280 character limit. If you're over, cut the least essential words — a tight, punchy tweet is better than a padded one. **Never use em dashes (—).** Use commas, semicolons, or restructure sentences instead.
 - Keep `draft_text` grounded in the provided facts where possible.
 - Quote tweets are disabled for now, so `quote_target_url` must always be `null`.
-- When `repoLinkUrl` is present and `quote_target_url` is `null`, write `draft_text` as the lead tweet of a 2-post thread. The system will publish a reply containing that repo link, so keep the lead tweet focused and do not waste characters pasting the repo URL into `draft_text`.
-- For original posts about shipped work, projects, infra, or pushes, prefer a concrete `media_request` instead of `null`, especially when `selection.suggestedMediaRequest` is present.
+- `include_repo_link` defaults to `false`. Only set it to `true` when the post is about a specific shipped feature or public project AND seeing the repo would add meaningful context for readers (e.g., a launch post for an open-source tool). Do NOT set `true` for internal work, commentary, musings, infra, or posts where the repo is incidental. When `true` and `repoLinkUrl` is present, the system will publish a second tweet in-thread containing that URL, so keep `draft_text` focused and do not paste the URL into it yourself.
+- For every original single-post draft, you MUST set a concrete `media_request` (never `null`). Be specific: "screenshot of the new Innies watch-me-work tab", "photo of the whiteboard sketch", "clip of the UI animation", "screenshot of the deploy dashboard showing prod status". Only set `media_request` to `null` if `quote_target_url` is non-null (quote tweets don't carry attached media). If `selection.suggestedMediaRequest` is present, use it as a starting point and sharpen it.
 - `receipts` should be short factual reminders for the human reviewer.
 - `quote_target_url` and `media_request` must be `null` when unused.
 - `allowed_commands` should only contain the human control commands that are actually supported.

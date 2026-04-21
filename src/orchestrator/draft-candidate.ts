@@ -150,8 +150,9 @@ export async function draftSelectedCandidate({
     : null;
   assertTweetLength(safeDraftText, 'draft_text');
   const repoLinkResolver = resolvePublicRepoLinkUrl ?? resolvePublicGitHubRepoUrl;
+  const includeRepoLink = (drafterResult as { include_repo_link?: boolean }).include_repo_link === true;
   const threadReplyText =
-    quoteTargetUrl === null
+    includeRepoLink && quoteTargetUrl === null
       ? await repoLinkResolver({ repoUrl: selected.selectedPacket.repoLinkUrl })
       : null;
 
@@ -159,7 +160,11 @@ export async function draftSelectedCandidate({
     assertTweetLength(threadReplyText, 'thread_reply_text');
   }
 
-  const mediaRequest = drafterResult.media_request ?? selected.selectedPacket.selection.suggestedMediaRequest;
+  // Use drafter's concrete media_request if present, else the selector's suggestion.
+  // If both are null, we send no media_request line — better to show nothing than
+  // prompt the user with vague "attach something if handy" noise.
+  const mediaRequest =
+    drafterResult.media_request ?? selected.selectedPacket.selection.suggestedMediaRequest;
   const graceMinutes = publishGraceMinutes ?? 10;
   const nowFn = now ?? (() => new Date());
   const candidate = await transitionCandidate(db, {

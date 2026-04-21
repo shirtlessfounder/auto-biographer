@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { gzipSync } from 'node:zlib';
 
 import type { Pool } from 'pg';
+import type { McpPool } from '../../../src/db/pool';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { runMigrations } from '../../../src/db/migrate';
@@ -17,7 +18,7 @@ const execFileAsync = promisify(execFile);
 
 type TestDatabase = {
   dataDirectory: string;
-  pool: Pool;
+  pool: McpPool;
 };
 
 async function allocatePort(): Promise<number> {
@@ -92,7 +93,7 @@ async function createTestDatabase(): Promise<TestDatabase> {
     'start',
   ]);
 
-  const pool = createPool(
+  const pool = await createPool(
     `postgres://${encodeURIComponent(process.env.USER ?? 'postgres')}@127.0.0.1:${String(port)}/postgres`,
   );
 
@@ -113,14 +114,14 @@ async function stopTestDatabase(database: TestDatabase): Promise<void> {
   await rm(path.dirname(database.dataDirectory), { force: true, recursive: true });
 }
 
-async function resetSchema(pool: Pool): Promise<void> {
+async function resetSchema(pool: McpPool): Promise<void> {
   await pool.query(`
     drop schema public cascade;
     create schema public;
   `);
 }
 
-async function createInniesTables(pool: Pool): Promise<void> {
+async function createInniesTables(pool: McpPool): Promise<void> {
   await pool.query(`
     create table in_api_keys (
       id uuid primary key,

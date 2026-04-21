@@ -126,7 +126,9 @@ export async function publishCandidate(input: {
     }
 
     const repoLinkUrl =
-      quoteTargetUrl === null && drafterPayload?.delivery_kind === 'single_post'
+      drafterPayload?.include_repo_link === true
+        && quoteTargetUrl === null
+        && drafterPayload.delivery_kind === 'single_post'
         ? await resolvePublicRepoLinkUrl({
           repoUrl: await loadCandidateRepoLinkUrl(input.db, input.candidateId),
         })

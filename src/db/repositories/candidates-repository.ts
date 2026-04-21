@@ -405,5 +405,54 @@ export function createCandidatesRepository(db: Queryable) {
 
       return row ? mapCandidateRow(row) : null;
     },
+
+    async replaceMediaBatchByCandidateId(input: {
+      candidateId: string;
+      allowedStatuses: string[];
+      mediaBatchJson: unknown;
+    }): Promise<CandidateRecord | null> {
+      if (input.allowedStatuses.length === 0) {
+        throw new Error('allowedStatuses must include at least one status');
+      }
+
+      const statusPlaceholders = input.allowedStatuses.map((_, i) => `$${i + 2}`).join(', ');
+      const result = await db.query<CandidateRow>(
+        `
+          update sp_post_candidates
+          set media_batch_json = $3,
+              updated_at = now()
+          where id = $1::bigint
+            and status IN (${statusPlaceholders})
+          returning
+            id,
+            trigger_type,
+            candidate_type,
+            status,
+            deadline_at,
+            reminder_sent_at,
+            selector_output_json,
+            drafter_output_json,
+            final_post_text,
+            quote_target_url,
+            media_request,
+            telegram_message_id,
+            media_batch_json,
+            degraded,
+            error_details,
+            publish_at,
+            created_at,
+            updated_at
+        `,
+        [
+          input.candidateId,
+          input.allowedStatuses,
+          toJsonbValue(input.mediaBatchJson),
+        ],
+      );
+
+      const row = result.rows[0];
+
+      return row ? mapCandidateRow(row) : null;
+    },
   };
 }
