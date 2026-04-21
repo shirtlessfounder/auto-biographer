@@ -179,7 +179,7 @@ function getEventSourcePriority(event: ContextEvent): number {
     case 'agent_conversation':
       return 300;
     case 'slack_message':
-      return 200;
+      return 400;
     case 'slack_link':
       return 100;
     default:
