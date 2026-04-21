@@ -339,7 +339,8 @@ async function runSyncSources(sources: readonly SyncSource[]): Promise<{ degrade
   for (const source of sources) {
     try {
       await source.sync();
-    } catch {
+    } catch (e) {
+      console.error(`[runSyncSources] source ${source.name} failed:`, e);
       degraded = true;
     }
   }
