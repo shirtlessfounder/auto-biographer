@@ -130,7 +130,7 @@ function sessionToEvent(session: InniesSession): NormalizedEventInput {
   return {
     source: 'agent_conversation',
     sourceId: session.sessionKey,
-    occurredAt: new Date(session.startedAt),
+    occurredAt: new Date(session.lastActivityAt),
     author: 'dylan',
     urlOrLocator: null,
     title: `[${agentLabel}] ${firstRequest.slice(0, 120) || 'CLI session'}`,
