@@ -415,14 +415,18 @@ export function createCandidatesRepository(db: Queryable) {
         throw new Error('allowedStatuses must include at least one status');
       }
 
-      const statusPlaceholders = input.allowedStatuses.map((_, i) => `$${i + 2}`).join(', ');
+      // $1=candidateId, $2=allowedStatuses (text[]), $3=mediaBatchJson.
+      // Previously built "status IN ($2, $3, $4, ...)" with the status array
+      // collapsed into a single slot — PG treated the array as one opaque
+      // value and the IN clause never matched. = ANY($2::text[]) is the
+      // correct spread here.
       const result = await db.query<CandidateRow>(
         `
           update sp_post_candidates
           set media_batch_json = $3,
               updated_at = now()
           where id = $1::bigint
-            and status IN (${statusPlaceholders})
+            and status = ANY($2::text[])
           returning
             id,
             trigger_type,
