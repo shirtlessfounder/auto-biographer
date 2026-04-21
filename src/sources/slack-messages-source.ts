@@ -124,18 +124,6 @@ export function createSlackMessagesSource(
         }
       }
 
-      if (result.rows.length > 0 && result.rows[0]._json !== undefined) {
-        try {
-          const rawVal = result.rows[0]._json;
-          console.error(`[slack-messages] _json type=${typeof rawVal}, isArray=${Array.isArray(rawVal)}, isString=${typeof rawVal === 'string'}, first200=${typeof rawVal === 'string' ? (rawVal as string).slice(0,200) : String(rawVal).slice(0,200)}`);
-        } catch (e) { console.error(`[slack-messages] debug error: ${(e as Error).message}`); }
-      }
-
-      console.error(`[slack-messages] ${rows.length} rows from DB, lookback=${lookback}h, userIds=${filters.authorUserIds}`);
-      if (rows.length === 0 && result.rows.length > 0) {
-        console.error(`[slack-messages] first row keys: ${Object.keys(result.rows[0]!).join(', ')}`);
-      }
-
       const events: NormalizedEventInput[] = [];
 
       for (const row of rows) {
@@ -167,7 +155,6 @@ export function createSlackMessagesSource(
         });
       }
 
-      console.error(`[slack-messages] ${events.length} events after author filter`);
       return upsertEvents(db, events);
     },
   };
