@@ -877,6 +877,23 @@ export async function runTick(input: RunTickInput): Promise<RunTickResult> {
         postRequestedCandidateIds.push(candidate.id);
       }
     }
+
+    // Drain orphans: a candidate already in post_requested needs publishing,
+    // e.g. from a CLI apply-command post_now call outside a tick, or from a
+    // previous tick that crashed between transition and publish.
+    if (candidate.status === 'post_requested') {
+      await publishRequestedCandidate({
+        db: input.db,
+        telegramClient: input.telegramClient,
+        candidateId: candidate.id,
+        postProfile: input.postProfile,
+        oauthCredentials: input.oauthCredentials,
+        xApiBaseUrl: input.xApiBaseUrl,
+        now,
+        publishToX: input.publishToX,
+      });
+      postRequestedCandidateIds.push(candidate.id);
+    }
   }
 
   return {

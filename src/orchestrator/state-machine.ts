@@ -132,10 +132,10 @@ export async function listCandidatesForAutomation(db: Queryable): Promise<Candid
         created_at,
         updated_at
       from sp_post_candidates
-      where status IN ($1, $2, $3)
+      where status IN ($1, $2, $3, $4)
       order by id asc
     `,
-    ['pending_approval', 'reminded', 'held'],
+    ['pending_approval', 'reminded', 'held', 'post_requested'],
   );
 
   return result.rows.map(mapCandidateRow);

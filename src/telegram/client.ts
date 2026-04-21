@@ -148,8 +148,9 @@ function buildTelegramApiUrl(apiBaseUrl: string, botToken: string, method: strin
 
 function buildTelegramFileUrl(apiBaseUrl: string, botToken: string, filePath: string): string {
   const normalizedBaseUrl = apiBaseUrl.endsWith('/') ? apiBaseUrl.slice(0, -1) : apiBaseUrl;
-  // Proxy injects bot token server-side — URL pattern is {baseUrl}/file/{filePath}
-  return `${normalizedBaseUrl}/file/${filePath}`;
+  // Proxy injects bot token server-side — URL pattern is {baseUrl}/file/bot/{filePath}
+  // (mirrors upstream Telegram's /file/bot<TOKEN>/<path>). Without /bot the proxy 404s.
+  return `${normalizedBaseUrl}/file/bot/${filePath}`;
 }
 
 async function requestTelegramApi<Result>(input: {
