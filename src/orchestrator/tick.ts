@@ -481,7 +481,7 @@ async function runSharedDraftPipeline(input: SharedDraftPipelineInput): Promise<
       db: input.db,
       context,
       triggerType: input.triggerType,
-      fallbackOnSkip: input.triggerType === 'scheduled',
+      fallbackOnSkip: true,
       runSelector: input.runSelector,
       hermesBin: input.hermesBin,
       hermesExecutor: input.hermesExecutor,
