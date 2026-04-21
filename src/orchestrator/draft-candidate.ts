@@ -87,10 +87,20 @@ function truncateTo280(text: string): string {
 }
 
 function normalizeDraftText(text: unknown, fallback: string): string {
-  if (typeof text === 'string' && text.trim().length > 0) {
-    return text.trim();
+  if (typeof text !== 'string' || text.trim().length === 0) {
+    return fallback;
   }
-  return fallback;
+  // Defensive: some models double-escape and emit the literal two-char
+  // sequence \n (backslash + n) instead of a real newline in the JSON
+  // string. JSON.parse decodes that to a literal backslash-n, which would
+  // then ship verbatim in the tweet. Convert known escape sequences back to
+  // their real characters here so a bot-bleed \n can never be published.
+  const unescaped = text
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t');
+  const normalized = unescaped.replace(/\r\n/g, '\n');
+  return normalized.trim();
 }
 
 async function transitionCandidate(
