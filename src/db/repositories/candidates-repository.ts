@@ -415,18 +415,21 @@ export function createCandidatesRepository(db: Queryable) {
         throw new Error('allowedStatuses must include at least one status');
       }
 
-      // $1=candidateId, $2=allowedStatuses (text[]), $3=mediaBatchJson.
-      // Previously built "status IN ($2, $3, $4, ...)" with the status array
-      // collapsed into a single slot — PG treated the array as one opaque
-      // value and the IN clause never matched. = ANY($2::text[]) is the
-      // correct spread here.
+      // The MCP client substitutes $N params via naive string interpolation, so
+      // a JS array passed as one slot becomes 'a,b,c' (not a valid text[] literal).
+      // Spread each status into its own $N placeholder — the client emits each
+      // as a quoted scalar and `status IN (...)` matches correctly.
+      const statusPlaceholders = input.allowedStatuses
+        .map((_, i) => `$${i + 2}`)
+        .join(', ');
+      const mediaPlaceholder = `$${input.allowedStatuses.length + 2}`;
       const result = await db.query<CandidateRow>(
         `
           update sp_post_candidates
-          set media_batch_json = $3,
+          set media_batch_json = ${mediaPlaceholder},
               updated_at = now()
           where id = $1::bigint
-            and status = ANY($2::text[])
+            and status IN (${statusPlaceholders})
           returning
             id,
             trigger_type,
@@ -449,7 +452,7 @@ export function createCandidatesRepository(db: Queryable) {
         `,
         [
           input.candidateId,
-          input.allowedStatuses,
+          ...input.allowedStatuses,
           toJsonbValue(input.mediaBatchJson),
         ],
       );
